@@ -451,8 +451,8 @@ def login_screen():
                         st.rerun()
 
             st.markdown("---")
-            st.info("🔐 Credenciales de prueba:")
-            st.code("Usuario: Admin Principal\nContraseña: admin")
+            st.info("Desarrollado por Ingeniero Erik Armenta")
+
 
 def main_app():
     """Interfaz principal después del login"""
