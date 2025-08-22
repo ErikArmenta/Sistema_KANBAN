@@ -3,11 +3,11 @@ import pandas as pd
 from datetime import date, timedelta, datetime
 import hashlib
 import plotly.express as px
-import base64
 from io import BytesIO
 import gspread
 from gspread_dataframe import get_as_dataframe, set_with_dataframe
 from oauth2client.service_account import ServiceAccountCredentials
+
 
 # --- CONFIGURACIÓN GOOGLE SHEETS ---
 SHEET_NAME = "kanban_backend"
@@ -47,8 +47,7 @@ def ensure_worksheets_exist():
                     new_worksheet.update('A1', [['task_id', 'username']])
                 elif sheet_name == "task_interactions":
                     new_worksheet.update('A1', [['id', 'task_id', 'username', 'action_type',
-                                               'timestamp', 'comment_text', 'image_base64',
-                                               'new_status', 'progress_value']])
+                                               'timestamp', 'comment_text', 'new_status', 'progress_value']])
                 elif sheet_name == "users":
                     new_worksheet.update('A1', [['username', 'password_hash', 'role']])
 
@@ -236,6 +235,8 @@ def update_task_status_in_db(task_id, new_status, completion_date=None, progress
     set_with_dataframe(ws, df)
     st.success("✅ Estado de tarea actualizado en Google Sheets.")
     load_tasks_from_db()
+
+
 
 def add_task_interaction(task_id, username, action_type, comment_text=None, image_base64=None, new_status=None, progress_value=None):
     sheet = get_gsheet_connection()
@@ -585,14 +586,14 @@ def main_app():
                                     st.caption(f"💬 {interaccion.get('username', 'Usuario')} - {interaccion.get('timestamp', 'Fecha')}")
                                     st.info(interaccion['comment_text'])
 
-                                if interaccion.get('image_base64'):
-                                    st.caption("📸 Evidencia adjunta")
-                                    try:
-                                        st.image(base64.b64decode(interaccion['image_base64']), use_column_width=True)
-                                    except:
-                                        st.error("Error al cargar imagen")
+                                # if interaccion.get('image_base64'):
+                                #     st.caption("📸 Evidencia adjunta")
+                                #     try:
+                                #         st.image(base64.b64decode(interaccion['image_base64']), use_column_width=True)
+                                #     except:
+                                #         st.error("Error al cargar imagen")
 
-                                st.markdown("---")
+                                # st.markdown("---")
 
                     if estado in ['Por hacer', 'En proceso']:
                         current_username = st.session_state.get('username')
@@ -611,11 +612,11 @@ def main_app():
                                         key=f"comment_{task['id']}_form"
                                     )
 
-                                    evidencia = st.file_uploader(
-                                        "Subir evidencia (imagen):",
-                                        type=["png", "jpg", "jpeg"],
-                                        key=f"upload_{task['id']}_form"
-                                    )
+                                    # evidencia = st.file_uploader(
+                                    #     "Subir evidencia (imagen):",
+                                    #     type=["png", "jpg", "jpeg"],
+                                    #     key=f"upload_{task['id']}_form"
+                                    # )
 
                                     col1_form, col2_form = st.columns(2)
 
@@ -627,8 +628,8 @@ def main_app():
 
                                     if submit_avance:
                                         imagen_b64 = None
-                                        if evidencia:
-                                            imagen_b64 = base64.b64encode(evidencia.getvalue()).decode('utf-8')
+                                        # if evidencia:
+                                        #     imagen_b64 = base64.b64encode(evidencia.getvalue()).decode('utf-8')
 
                                         update_task_status_in_db(
                                             task['id'],
@@ -648,8 +649,8 @@ def main_app():
 
                                     if submit_completar:
                                         imagen_b64 = None
-                                        if evidencia:
-                                            imagen_b64 = base64.b64encode(evidencia.getvalue()).decode('utf-8')
+                                        # if evidencia:
+                                        #     imagen_b64 = base64.b64encode(evidencia.getvalue()).decode('utf-8')
 
                                         update_task_status_in_db(
                                             task['id'],
