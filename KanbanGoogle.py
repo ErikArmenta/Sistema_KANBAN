@@ -7,7 +7,17 @@ from io import BytesIO
 import gspread
 from gspread_dataframe import get_as_dataframe, set_with_dataframe
 from oauth2client.service_account import ServiceAccountCredentials
+from PIL import Image  # Agregar esta importación
+import base64  # Agregar esta importación
 
+
+# Configuración de la página (debe ser lo primero después de los imports)
+st.set_page_config(
+    page_title="Sistema Kanban",
+    page_icon="📋",  # Puedes usar emojis o rutas a imágenes
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # --- CONFIGURACIÓN GOOGLE SHEETS ---
 SHEET_NAME = "kanban_backend"
@@ -274,6 +284,41 @@ def add_task_interaction(task_id, username, action_type, comment_text=None, imag
     st.success("Interacción registrada en Google Sheets.")
     load_tasks_from_db()
 
+    # Función para procesar y redimensionar imágenes
+def process_image(uploaded_file, max_size=(800, 600)):
+    """
+    Procesa y redimensiona una imagen para que sea compatible con Google Sheets
+
+    Args:
+        uploaded_file: Archivo subido a través de st.file_uploader
+        max_size: Tamaño máximo (ancho, alto) para redimensionar
+
+    Returns:
+        str: Imagen codificada en base64 o None si hay error
+    """
+    try:
+        # Abrir la imagen con Pillow
+        image = Image.open(uploaded_file)
+
+        # Convertir a RGB si es necesario (para PNG con transparencia)
+        if image.mode in ('RGBA', 'P'):
+            image = image.convert('RGB')
+
+        # Redimensionar manteniendo la relación de aspecto
+        image.thumbnail(max_size, Image.Resampling.LANCZOS)
+
+        # Guardar en un buffer en formato JPEG (más compatible)
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=85)
+
+        # Codificar en base64
+        img_str = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        return img_str
+
+    except Exception as e:
+        st.error(f"Error al procesar la imagen: {str(e)}")
+        return None
+
 def generate_excel_export():
     sheet = get_gsheet_connection()
     output = BytesIO()
@@ -451,7 +496,7 @@ def login_screen():
                         st.rerun()
 
             st.markdown("---")
-            st.info("Desarrollado por Ingeniero Erik Armenta")
+            st.caption("**Engineered by Erik Armenta, M.Eng.** | _Operational Excellence through Technology_")
 
 
 def main_app():
@@ -531,8 +576,87 @@ def main_app():
                         }
                         add_task_to_db(nueva_tarea, destino, responsables)
 
+# ... (código anterior permanece igual)
+
+def main_app():
+    """Interfaz principal después del login"""
+    st.set_page_config(page_title="Sistema Kanban", layout="wide")
+
+    # Barra lateral con info de usuario
+    with st.sidebar:
+        if st.session_state.logged_in:
+            st.write(f"👤 Usuario: **{st.session_state.username}**")
+            st.write(f"🎚️ Rol: **{st.session_state.current_role}**")
+            if st.button("Cerrar Sesión"):
+                st.session_state.logged_in = False
+                st.session_state.username = None
+                st.session_state.current_role = None
+                st.rerun()
+
+    # Determinar roles admin (insensible a mayúsculas)
+    admin_roles = ["admin principal", "supervisor", "coordinador"]
+    is_admin = st.session_state.current_role.lower() in admin_roles
+
+    # Definir pestañas
+    tab_names = ["📋 Tablero Kanban"]
+    if is_admin:
+        tab_names.insert(0, "➕ Agregar Tarea")
+        tab_names.append("📊 Estadísticas")
+        tab_names.append("⚙️ Gestión Usuarios")
+
+    tabs = st.tabs(tab_names)
+
+    # --- Pestaña: Agregar Tarea (Solo admin) ---
+    if is_admin and "➕ Agregar Tarea" in tab_names:
+        with tabs[tab_names.index("➕ Agregar Tarea")]:
+            st.header("➕ Agregar Nueva Tarea")
+            st.markdown("---")
+
+            with st.form("agregar_tarea"):
+                tarea = st.text_input("Nombre de la Tarea*")
+                description = st.text_area("Descripción de la Tarea (Opcional)")
+
+                # Obtener usuarios para asignar
+                sheet = get_gsheet_connection()
+                df_users = get_as_dataframe(sheet.worksheet("users"))
+                df_users = df_users[df_users.iloc[:, 0].notna()].copy() if not df_users.empty else pd.DataFrame()
+
+                collab_users = []
+                if not df_users.empty and 'role' in df_users.columns:
+                    collab_users = df_users[~df_users['role'].str.lower().isin(["admin principal"])]['username'].tolist()
+                collab_users.sort()
+
+                responsables = st.multiselect("Seleccionar Responsables*", options=collab_users)
+
+                fecha = st.date_input("Fecha de Creación*", date.today())
+                fecha_inicial = st.date_input("Fecha Inicial (Opcional)", value=None)
+                fecha_termino = st.date_input("Fecha Término (Opcional)", value=None)
+
+                prioridad = st.selectbox("Prioridad*", ["Alta", "Media", "Baja"])
+                turno = st.selectbox("Turno*", ["1er Turno", "2do Turno", "3er Turno"])
+                destino = st.selectbox("Columna Inicial*", ["Por hacer", "En proceso"])
+
+                submit = st.form_submit_button("Crear Tarea")
+
+                if submit:
+                    if not tarea:
+                        st.error("El nombre de la tarea es obligatorio")
+                    elif not responsables:
+                        st.error("Debe asignar al menos un responsable")
+                    else:
+                        nueva_tarea = {
+                            "task": tarea,
+                            "description": description,
+                            "date": fecha.strftime("%Y-%m-%d"),
+                            "priority": prioridad,
+                            "shift": turno,
+                            "start_date": fecha_inicial.strftime("%Y-%m-%d") if fecha_inicial else None,
+                            "due_date": fecha_termino.strftime("%Y-%m-%d") if fecha_termino else None
+                        }
+                        add_task_to_db(nueva_tarea, destino, responsables)
+
     # --- Pestaña: Tablero Kanban ---
-    with tabs[tab_names.index("📋 Tablero Kanban")]:
+    with tabs[tab_names.index("📋 Tablero Kanban")]:  # CORREGIDO: Esta línea debe estar indentada
         st.header("📋 Tablero Kanban")
         st.markdown("---")
 
@@ -586,14 +710,17 @@ def main_app():
                                     st.caption(f"💬 {interaccion.get('username', 'Usuario')} - {interaccion.get('timestamp', 'Fecha')}")
                                     st.info(interaccion['comment_text'])
 
-                                # if interaccion.get('image_base64'):
-                                #     st.caption("📸 Evidencia adjunta")
-                                #     try:
-                                #         st.image(base64.b64decode(interaccion['image_base64']), use_column_width=True)
-                                #     except:
-                                #         st.error("Error al cargar imagen")
+                                # REEMPLAZAR LAS LÍNEAS COMENTADAS CON ESTO:
+                                if interaccion.get('image_base64'):
+                                    st.caption("📸 Evidencia adjunta")
+                                    try:
+                                        # Decodificar la imagen base64
+                                        img_data = base64.b64decode(interaccion['image_base64'])
+                                        st.image(img_data, use_container_width=True, caption="Evidencia visual")
+                                    except Exception as e:
+                                        st.error(f"Error al cargar imagen: {str(e)}")
 
-                                # st.markdown("---")
+                                st.markdown("---")
 
                     if estado in ['Por hacer', 'En proceso']:
                         current_username = st.session_state.get('username')
@@ -612,11 +739,13 @@ def main_app():
                                         key=f"comment_{task['id']}_form"
                                     )
 
-                                    # evidencia = st.file_uploader(
-                                    #     "Subir evidencia (imagen):",
-                                    #     type=["png", "jpg", "jpeg"],
-                                    #     key=f"upload_{task['id']}_form"
-                                    # )
+                                    # REEMPLAZAR LA LÍNEA COMENTADA CON ESTO:
+                                    evidencia = st.file_uploader(
+                                        "Subir evidencia (imagen):",
+                                        type=["png", "jpg", "jpeg"],
+                                        key=f"upload_{task['id']}_form",
+                                        help="Suba una imagen como evidencia del avance"
+                                    )
 
                                     col1_form, col2_form = st.columns(2)
 
@@ -626,47 +755,42 @@ def main_app():
                                     with col2_form:
                                         submit_completar = st.form_submit_button("Marcar como completada", help="Marca la tarea como completada al 100%.")
 
-                                    if submit_avance:
+                                    if submit_avance or submit_completar:
                                         imagen_b64 = None
-                                        # if evidencia:
-                                        #     imagen_b64 = base64.b64encode(evidencia.getvalue()).decode('utf-8')
+                                        # Procesar imagen si se subió una
+                                        if evidencia:
+                                            imagen_b64 = process_image(evidencia)
+                                            if not imagen_b64:
+                                                st.error("Error al procesar la imagen. Intente con otra.")
+                                                st.stop()
 
+                                        # Determinar el nuevo estado y progreso
+                                        if submit_completar:
+                                            nuevo_estado = "Hecho"
+                                            nuevo_progreso = 100
+                                            fecha_completado = date.today().strftime("%Y-%m-%d")
+                                        else:
+                                            nuevo_estado = task['status']
+                                            nuevo_progreso = nuevo_progreso
+                                            fecha_completado = None
+
+                                        # Actualizar estado y progreso
                                         update_task_status_in_db(
                                             task['id'],
-                                            task['status'],
+                                            nuevo_estado,
+                                            fecha_completado,
                                             progress=nuevo_progreso
                                         )
 
+                                        # Registrar la interacción
                                         add_task_interaction(
                                             task_id=task['id'],
                                             username=st.session_state.username,
-                                            action_type='progress_update',
+                                            action_type='status_change' if submit_completar else 'progress_update',
                                             comment_text=comentario,
                                             image_base64=imagen_b64,
+                                            new_status=nuevo_estado,
                                             progress_value=nuevo_progreso
-                                        )
-                                        st.rerun()
-
-                                    if submit_completar:
-                                        imagen_b64 = None
-                                        # if evidencia:
-                                        #     imagen_b64 = base64.b64encode(evidencia.getvalue()).decode('utf-8')
-
-                                        update_task_status_in_db(
-                                            task['id'],
-                                            "Hecho",
-                                            date.today().strftime("%Y-%m-%d"),
-                                            progress=100
-                                        )
-
-                                        add_task_interaction(
-                                            task_id=task['id'],
-                                            username=st.session_state.username,
-                                            action_type='status_change',
-                                            comment_text=comentario,
-                                            image_base64=imagen_b64,
-                                            new_status="Hecho",
-                                            progress_value=100
                                         )
                                         st.rerun()
 
