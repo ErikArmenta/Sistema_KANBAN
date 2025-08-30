@@ -480,8 +480,18 @@ def initialize_app():
 def login_screen():
     """Muestra solo la pantalla de login hasta que se autentique"""
     st.set_page_config(page_title="Login - Sistema Kanban", layout="centered")
-    st.title("Sistema Kanban")
-    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center;'>
+        <h1 style='color: #1E90FF; font-size: 2.5em; margin-bottom: 0;'>
+            🚀 KANBAN PRO
+        </h1>
+        <p style='color: #FF8C00; font-size: 1.2em; margin-top: 0;'>
+            ENGINEERED FOR PERFORMANCE
+        </p>
+        <div style='background: linear-gradient(90deg, #FF8C00, #1E90FF);
+                    height: 3px; width: 50%; margin: 10px auto;'></div>
+    </div>
+""", unsafe_allow_html=True)
 
     with st.container():
         col1, col2, col3 = st.columns([1, 3, 1])
