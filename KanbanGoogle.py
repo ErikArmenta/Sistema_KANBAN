@@ -7,14 +7,13 @@ from io import BytesIO
 import gspread
 from gspread_dataframe import get_as_dataframe, set_with_dataframe
 from oauth2client.service_account import ServiceAccountCredentials
-from PIL import Image  # Agregar esta importación
-import base64  # Agregar esta importación
-
+from PIL import Image
+import base64
 
 # Configuración de la página (debe ser lo primero después de los imports)
 st.set_page_config(
     page_title="Sistema Kanban",
-    page_icon="📋",  # Puedes usar emojis o rutas a imágenes
+    page_icon="📋",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -33,7 +32,6 @@ def get_gsheet_connection():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
     return client.open(SHEET_NAME)
-
 
 def ensure_worksheets_exist():
     """Verifica y crea las hojas necesarias si no existen"""
@@ -64,8 +62,6 @@ def ensure_worksheets_exist():
                 st.success(f"Hoja '{sheet_name}' creada automáticamente")
     except Exception as e:
         st.error(f"Error al verificar hojas: {str(e)}")
-
-
 
 # --- FUNCIONES DE AUTENTICACIÓN MEJORADAS ---
 def hash_password(password):
@@ -246,8 +242,6 @@ def update_task_status_in_db(task_id, new_status, completion_date=None, progress
     st.success("✅ Estado de tarea actualizado en Google Sheets.")
     load_tasks_from_db()
 
-
-
 def add_task_interaction(task_id, username, action_type, comment_text=None, image_base64=None, new_status=None, progress_value=None):
     sheet = get_gsheet_connection()
     ws = sheet.worksheet("task_interactions")
@@ -284,7 +278,7 @@ def add_task_interaction(task_id, username, action_type, comment_text=None, imag
     st.success("Interacción registrada en Google Sheets.")
     load_tasks_from_db()
 
-    # Función para procesar y redimensionar imágenes
+# Función para procesar y redimensionar imágenes
 def process_image(uploaded_file, max_size=(800, 600)):
     """
     Procesa y redimensiona una imagen para que sea compatible con Google Sheets
@@ -470,6 +464,8 @@ def initialize_app():
         st.session_state.username = None
     if 'current_role' not in st.session_state:
         st.session_state.current_role = None
+    if 'form_cleared' not in st.session_state:
+        st.session_state.form_cleared = False
 
     # Asegurar que las hojas existan antes de cargar datos
     ensure_worksheets_exist()
@@ -508,6 +504,10 @@ def login_screen():
             st.markdown("---")
             st.caption("**Engineered by Erik Armenta, M.Eng.** | _Operational Excellence through Technology_")
 
+def clear_form():
+    """Limpia el formulario de creación de tareas"""
+    st.session_state.form_cleared = True
+    st.rerun()
 
 def main_app():
     """Interfaz principal después del login"""
@@ -518,7 +518,13 @@ def main_app():
         if st.session_state.logged_in:
             st.write(f"👤 Usuario: **{st.session_state.username}**")
             st.write(f"🎚️ Rol: **{st.session_state.current_role}**")
-            if st.button("Cerrar Sesión"):
+
+            # Botón para refrescar el tablero
+            if st.button("🔄 Refrescar Tablero", use_container_width=True):
+                load_tasks_from_db()
+                st.success("Tablero actualizado")
+
+            if st.button("Cerrar Sesión", use_container_width=True):
                 st.session_state.logged_in = False
                 st.session_state.username = None
                 st.session_state.current_role = None
@@ -543,31 +549,38 @@ def main_app():
             st.header("➕ Agregar Nueva Tarea")
             st.markdown("---")
 
-            with st.form("agregar_tarea"):
-                tarea = st.text_input("Nombre de la Tarea*")
-                description = st.text_area("Descripción de la Tarea (Opcional)")
+            # Inicializar el estado del formulario si es necesario
+            if 'form_cleared' not in st.session_state:
+                st.session_state.form_cleared = False
 
-                # Obtener usuarios para asignar
-                sheet = get_gsheet_connection()
-                df_users = get_as_dataframe(sheet.worksheet("users"))
-                df_users = df_users[df_users.iloc[:, 0].notna()].copy() if not df_users.empty else pd.DataFrame()
+            # Obtener usuarios para asignar
+            sheet = get_gsheet_connection()
+            df_users = get_as_dataframe(sheet.worksheet("users"))
+            df_users = df_users[df_users.iloc[:, 0].notna()].copy() if not df_users.empty else pd.DataFrame()
 
-                collab_users = []
-                if not df_users.empty and 'role' in df_users.columns:
-                    collab_users = df_users[~df_users['role'].str.lower().isin(["admin principal"])]['username'].tolist()
-                collab_users.sort()
+            collab_users = []
+            if not df_users.empty and 'role' in df_users.columns:
+                collab_users = df_users[~df_users['role'].str.lower().isin(["admin principal"])]['username'].tolist()
+            collab_users.sort()
 
+            with st.form("agregar_tarea", clear_on_submit=True):
+                tarea = st.text_input("Nombre de la Tarea*", value="")
+                description = st.text_area("Descripción de la Tarea (Opcional)", value="")
                 responsables = st.multiselect("Seleccionar Responsables*", options=collab_users)
-
                 fecha = st.date_input("Fecha de Creación*", date.today())
                 fecha_inicial = st.date_input("Fecha Inicial (Opcional)", value=None)
                 fecha_termino = st.date_input("Fecha Término (Opcional)", value=None)
-
                 prioridad = st.selectbox("Prioridad*", ["Alta", "Media", "Baja"])
                 turno = st.selectbox("Turno*", ["1er Turno", "2do Turno", "3er Turno"])
                 destino = st.selectbox("Columna Inicial*", ["Por hacer", "En proceso"])
 
-                submit = st.form_submit_button("Crear Tarea")
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    submit = st.form_submit_button("Crear Tarea")
+                # with col2:
+                #     if st.form_submit_button("Limpiar Formulario"):
+                #         st.session_state.form_cleared = True
+                #         st.rerun()
 
                 if submit:
                     if not tarea:
@@ -585,90 +598,18 @@ def main_app():
                             "due_date": fecha_termino.strftime("%Y-%m-%d") if fecha_termino else None
                         }
                         add_task_to_db(nueva_tarea, destino, responsables)
-
-# ... (código anterior permanece igual)
-
-def main_app():
-    """Interfaz principal después del login"""
-    st.set_page_config(page_title="Sistema Kanban", layout="wide")
-
-    # Barra lateral con info de usuario
-    with st.sidebar:
-        if st.session_state.logged_in:
-            st.write(f"👤 Usuario: **{st.session_state.username}**")
-            st.write(f"🎚️ Rol: **{st.session_state.current_role}**")
-            if st.button("Cerrar Sesión"):
-                st.session_state.logged_in = False
-                st.session_state.username = None
-                st.session_state.current_role = None
-                st.rerun()
-
-    # Determinar roles admin (insensible a mayúsculas)
-    admin_roles = ["admin principal", "supervisor", "coordinador"]
-    is_admin = st.session_state.current_role.lower() in admin_roles
-
-    # Definir pestañas
-    tab_names = ["📋 Tablero Kanban"]
-    if is_admin:
-        tab_names.insert(0, "➕ Agregar Tarea")
-        tab_names.append("📊 Estadísticas")
-        tab_names.append("⚙️ Gestión Usuarios")
-
-    tabs = st.tabs(tab_names)
-
-    # --- Pestaña: Agregar Tarea (Solo admin) ---
-    if is_admin and "➕ Agregar Tarea" in tab_names:
-        with tabs[tab_names.index("➕ Agregar Tarea")]:
-            st.header("➕ Agregar Nueva Tarea")
-            st.markdown("---")
-
-            with st.form("agregar_tarea"):
-                tarea = st.text_input("Nombre de la Tarea*")
-                description = st.text_area("Descripción de la Tarea (Opcional)")
-
-                # Obtener usuarios para asignar
-                sheet = get_gsheet_connection()
-                df_users = get_as_dataframe(sheet.worksheet("users"))
-                df_users = df_users[df_users.iloc[:, 0].notna()].copy() if not df_users.empty else pd.DataFrame()
-
-                collab_users = []
-                if not df_users.empty and 'role' in df_users.columns:
-                    collab_users = df_users[~df_users['role'].str.lower().isin(["admin principal"])]['username'].tolist()
-                collab_users.sort()
-
-                responsables = st.multiselect("Seleccionar Responsables*", options=collab_users)
-
-                fecha = st.date_input("Fecha de Creación*", date.today())
-                fecha_inicial = st.date_input("Fecha Inicial (Opcional)", value=None)
-                fecha_termino = st.date_input("Fecha Término (Opcional)", value=None)
-
-                prioridad = st.selectbox("Prioridad*", ["Alta", "Media", "Baja"])
-                turno = st.selectbox("Turno*", ["1er Turno", "2do Turno", "3er Turno"])
-                destino = st.selectbox("Columna Inicial*", ["Por hacer", "En proceso"])
-
-                submit = st.form_submit_button("Crear Tarea")
-
-                if submit:
-                    if not tarea:
-                        st.error("El nombre de la tarea es obligatorio")
-                    elif not responsables:
-                        st.error("Debe asignar al menos un responsable")
-                    else:
-                        nueva_tarea = {
-                            "task": tarea,
-                            "description": description,
-                            "date": fecha.strftime("%Y-%m-%d"),
-                            "priority": prioridad,
-                            "shift": turno,
-                            "start_date": fecha_inicial.strftime("%Y-%m-%d") if fecha_inicial else None,
-                            "due_date": fecha_termino.strftime("%Y-%m-%d") if fecha_termino else None
-                        }
-                        add_task_to_db(nueva_tarea, destino, responsables)
+                        st.session_state.form_cleared = True
+                        st.rerun()
 
     # --- Pestaña: Tablero Kanban ---
-    with tabs[tab_names.index("📋 Tablero Kanban")]:  # CORREGIDO: Esta línea debe estar indentada
+    with tabs[tab_names.index("📋 Tablero Kanban")]:
         st.header("📋 Tablero Kanban")
         st.markdown("---")
+
+        # Botón para refrescar el tablero
+        if st.button("🔄 Refrescar Tablero", key="refresh_kanban"):
+            load_tasks_from_db()
+            st.success("Tablero actualizado")
 
         # Obtener lista de responsables para filtro
         all_responsibles = []
@@ -720,7 +661,6 @@ def main_app():
                                     st.caption(f"💬 {interaccion.get('username', 'Usuario')} - {interaccion.get('timestamp', 'Fecha')}")
                                     st.info(interaccion['comment_text'])
 
-                                # REEMPLAZAR LAS LÍNEAS COMENTADAS CON ESTO:
                                 if interaccion.get('image_base64'):
                                     st.caption("📸 Evidencia adjunta")
                                     try:
@@ -749,7 +689,6 @@ def main_app():
                                         key=f"comment_{task['id']}_form"
                                     )
 
-                                    # REEMPLAZAR LA LÍNEA COMENTADA CON ESTO:
                                     evidencia = st.file_uploader(
                                         "Subir evidencia (imagen):",
                                         type=["png", "jpg", "jpeg"],
@@ -1053,10 +992,11 @@ def main_app():
                     else:
                         st.error("Debe confirmar que entiende esta acción para continuar.")
 
-# --- FLUJO PRINCIPAL DE LA APLICACIÓN ---
-initialize_app()
+# --- EJECUCIÓN PRINCIPAL ---
+if __name__ == "__main__":
+    initialize_app()
 
-if not st.session_state.logged_in:
-    login_screen()
-else:
-    main_app()
+    if not st.session_state.logged_in:
+        login_screen()
+    else:
+        main_app()
