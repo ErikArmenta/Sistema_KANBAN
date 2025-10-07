@@ -7,6 +7,8 @@ Created on Wed Sep 24 10:00:45 2025
 
 
 
+
+
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime
@@ -16,7 +18,7 @@ from io import BytesIO
 import gspread
 from gspread_dataframe import get_as_dataframe, set_with_dataframe
 from oauth2client.service_account import ServiceAccountCredentials
-from PIL import Image, ImageOps
+from PIL import Image
 import base64
 import os
 
@@ -355,36 +357,23 @@ def recalc_task_progress(task_id):
 # -------------------------
 # Procesamiento de imágenes
 # -------------------------
-def process_image(uploaded_file, max_size=(1024, 1024)):
+def process_image(uploaded_file, max_size=(800,600)):
     """
-    Procesa y redimensiona una imagen para guardarla en base64.
-    Compatible con imágenes grandes o de teléfonos (corrige orientación EXIF).
+    Procesa y redimensiona una imagen para que se guarde en base64.
+    Devuelve string base64 o None en error.
     """
     try:
         image = Image.open(uploaded_file)
-        # Corrige orientación automática (muy común en móviles)
-        try:
-            image = ImageOps.exif_transpose(image)
-        except Exception:
-            pass
-
-        # Convertir a RGB si tiene transparencia
         if image.mode in ('RGBA', 'P'):
             image = image.convert('RGB')
-
-        # Redimensionar manteniendo proporción
         image.thumbnail(max_size, Image.Resampling.LANCZOS)
-
-        # Guardar como JPEG optimizado
         buffer = BytesIO()
         image.save(buffer, format="JPEG", quality=85)
-        img_bytes = buffer.getvalue()
-        img_str = base64.b64encode(img_bytes).decode('utf-8')
+        img_str = base64.b64encode(buffer.getvalue()).decode('utf-8')
         return img_str
     except Exception as e:
-        st.error(f"⚠️ Error al procesar la imagen: {e}")
+        st.error(f"Error al procesar la imagen: {e}")
         return None
-
 
 # -------------------------
 # Export / limpieza / usuarios
@@ -721,23 +710,12 @@ def main_app():
                                     st.caption(f"💬 {interaccion.get('username','Usuario')} - {interaccion.get('timestamp','Fecha')}")
                                     st.info(interaccion['comment_text'])
                                 if interaccion.get('image_base64'):
-                                    st.caption("📸 Evidencia adjunta (miniatura)")
+                                    st.caption("📸 Evidencia adjunta")
                                     try:
                                         img_data = base64.b64decode(interaccion['image_base64'])
-                                        # Miniatura (limitamos ancho a 200px para vista compacta)
-                                        st.image(img_data, width=200)
-
-                                        # Botón para descargar la imagen original
-                                        st.download_button(
-                                            label="⬇️ Descargar evidencia",
-                                            data=img_data,
-                                            file_name=f"evidencia_{interaccion.get('id','')}.jpg",
-                                            mime="image/jpeg",
-                                            key=f"download_{interaccion.get('id','')}"
-                                        )
+                                        st.image(img_data, use_container_width=True, caption="Evidencia visual")
                                     except Exception as e:
-                                        st.error(f"Error al mostrar imagen: {e}")
-
+                                        st.error(f"Error al cargar imagen: {e}")
                                 st.markdown("---")
                     # acciones para responsables/admin
                     if estado in ['Por hacer','En proceso']:
@@ -1034,3 +1012,6 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+
+
