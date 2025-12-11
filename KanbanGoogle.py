@@ -21,6 +21,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 from PIL import Image
 import base64
 import os
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+
 
 # ---------------------------
 # Configuración de la página
@@ -302,6 +304,10 @@ def add_task_interaction(task_id, username, action_type, comment_text=None, imag
     st.success("Interacción registrada en Google Sheets.")
     load_tasks_from_db()
 
+
+
+
+
 # -------------------------
 # Funciones para items
 # -------------------------
@@ -358,395 +364,329 @@ def recalc_task_progress(task_id):
         avg_progress = task_items['progress'].mean()
         update_task_status_in_db(task_id, None, progress=int(avg_progress))
 
-# -------------------------
-# Funciones para el plano permanente
-# -------------------------
-def cargar_maquinas_desde_db():
-    """Carga las máquinas desde Google Sheets"""
+
+# ---------- REQUIERE: pip install streamlit-aggrid ----------
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+
+def apply_updates_to_google_sheets(df_updated):
+    """
+    Actualiza la hoja 'tasks' y 'task_collaborators' leyendo df_updated.
+    df_updated debe contener: id, task, description, date, priority, shift, start_date, due_date, status, completion_date, progress, created_by, document_links, responsible_list (string o list)
+    """
     try:
         sheet = get_gsheet_connection()
-        ws_machines = sheet.worksheet("plant_machines")
-        df_machines = get_as_dataframe(ws_machines)
-        df_machines = df_machines[df_machines.iloc[:, 0].notna()].copy()
+        ws_tasks = sheet.worksheet("tasks")
+        # Cuidado con las columnas: reconstruimos el df_tasks con el mismo orden que la sheet
+        df_tasks_sheet = get_as_dataframe(ws_tasks)
+        # Convertir responsible_list a string (linea por linea) para guardarlo en collaborators hoja separada
+        # Primero actualizar tasks sheet (sin collaborators)
+        save_cols = ['id','task','description','date','priority','shift','start_date','due_date','status','completion_date','progress','created_by','document_links']
+        # Asegurar que existan todas las columnas
+        for c in save_cols:
+            if c not in df_updated.columns:
+                df_updated[c] = None
+        df_to_save = df_updated[save_cols].copy()
+        # Convertir NaN en empty
+        df_to_save = df_to_save.fillna('')
+        set_with_dataframe(ws_tasks, df_to_save)
 
-        if not df_machines.empty:
-            # Asegurar tipos de datos
-            df_machines['coord_x'] = pd.to_numeric(df_machines['coord_x'], errors='coerce').fillna(0)
-            df_machines['coord_y'] = pd.to_numeric(df_machines['coord_y'], errors='coerce').fillna(0)
-            return df_machines
-        else:
-            return pd.DataFrame()
+        # Ahora actualizar task_collaborators: vamos a recrearla desde responsible_list
+        ws_collab = sheet.worksheet("task_collaborators")
+        collab_rows = []
+        for _, r in df_updated.iterrows():
+            tid = int(r['id'])
+            rl = r.get('responsible_list', '')
+            if isinstance(rl, list):
+                for u in rl:
+                    collab_rows.append({'task_id': tid, 'username': u})
+            else:
+                # si es string separada por comas
+                if isinstance(rl, str) and rl.strip():
+                    for u in [x.strip() for x in rl.split(',') if x.strip()]:
+                        collab_rows.append({'task_id': tid, 'username': u})
+        df_collab_save = pd.DataFrame(collab_rows) if collab_rows else pd.DataFrame(columns=['task_id','username'])
+        set_with_dataframe(ws_collab, df_collab_save)
+        st.success("Cambios guardados en Google Sheets.")
     except Exception as e:
-        st.error(f"Error al cargar máquinas: {e}")
-        return pd.DataFrame()
+        st.error(f"Error guardando en Google Sheets: {e}")
 
-def guardar_maquina_en_db(maquina_data):
-    """Guarda una nueva máquina en Google Sheets"""
-    try:
-        sheet = get_gsheet_connection()
-        ws_machines = sheet.worksheet("plant_machines")
-        df_machines = get_as_dataframe(ws_machines)
-        df_machines = df_machines[df_machines.iloc[:, 0].notna()].copy() if not df_machines.empty else pd.DataFrame(columns=['machine_id', 'machine_name', 'area', 'coord_x', 'coord_y', 'machine_type', 'status', 'last_maintenance', 'next_maintenance'])
+def render_corporate_gantt(df_display, color_mode='priority'):
+    """
+    Dibuja un Gantt estilo corporativo con Plotly utilizando df_display
+    df_display debe tener start_date, due_date, task, progress, priority, responsible_list, status
+    """
+    import plotly.express as px
+    import plotly.graph_objects as go
 
-        # Generar nuevo ID
-        new_id = 1
-        if not df_machines.empty and 'machine_id' in df_machines.columns:
-            df_machines['machine_id'] = pd.to_numeric(df_machines['machine_id'], errors='coerce').fillna(0).astype(int)
-            new_id = int(df_machines["machine_id"].max() + 1)
-
-        maquina_data['machine_id'] = new_id
-        nueva_maquina_df = pd.DataFrame([maquina_data])
-
-        # Alinear columnas
-        if not df_machines.empty:
-            for col in df_machines.columns:
-                if col not in nueva_maquina_df.columns:
-                    nueva_maquina_df[col] = None
-            nueva_maquina_df = nueva_maquina_df[df_machines.columns]
-
-        df_machines = pd.concat([df_machines, nueva_maquina_df], ignore_index=True)
-        set_with_dataframe(ws_machines, df_machines)
-        return True
-    except Exception as e:
-        st.error(f"Error al guardar máquina: {e}")
-        return False
-
-def mostrar_plano_permanente():
-    """Muestra el plano permanente de la planta con máquinas reales"""
-    st.header("🗺️ Plano de Planta - Distribución Real")
-    st.markdown("---")
-
-    # Cargar datos de máquinas desde Google Sheets
-    df_machines = cargar_maquinas_desde_db()
-
-    if df_machines.empty:
-        st.warning("""
-        **No hay máquinas configuradas en el plano.**
-
-        Para usar esta funcionalidad:
-        1. Ve a la pestaña "⚙️ Configurar Plano" (solo administradores)
-        2. Agrega las máquinas de tu planta con sus coordenadas
-        3. Las tareas se vincularán automáticamente por nombre de máquina
-        """)
+    # Preparar barras (una fila por tarea)
+    df_display['start_date'] = pd.to_datetime(df_display['start_date'], errors='coerce')
+    df_display['due_date'] = pd.to_datetime(df_display['due_date'], errors='coerce')
+    df_display = df_display.dropna(subset=['start_date', 'due_date']).copy()
+    if df_display.empty:
+        st.info("No hay tareas con fechas para mostrar en el Gantt.")
         return
 
-    # Cargar tareas para vincular
-    tareas_activas = st.session_state.all_tasks_df
+    # Orden por responsable y fecha inicio
+    df_display = df_display.sort_values(['responsible_list','start_date'])
 
-    # Filtros
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        area_filtro = st.selectbox(
-            "Filtrar por Área:",
-            ["Todas"] + list(df_machines['area'].unique())
-        )
-    with col2:
-        estado_filtro = st.selectbox(
-            "Filtrar por Estado:",
-            ["Todos"] + list(df_machines['status'].unique())
-        )
-    with col3:
-        st.metric("Máquinas", len(df_machines))
+    # Color mapping por prioridad para consistencia corporativa
+    priority_map = {'Alta':'#d9534f', 'Media':'#f0ad4e', 'Baja':'#5bc0de'}
+    if color_mode == 'priority':
+        color_arg = 'priority'
+    else:
+        color_arg = 'responsible_list'
 
-    # Aplicar filtros
-    if area_filtro != "Todas":
-        df_machines = df_machines[df_machines['area'] == area_filtro]
-    if estado_filtro != "Todos":
-        df_machines = df_machines[df_machines['status'] == estado_filtro]
-
-    # Crear plano interactivo
     fig = go.Figure()
 
-    # 🎯 MODIFICA ESTAS ÁREAS SEGÚN TU PLANTA REAL
-    areas_planta = {
-        'Fabricación': {'x': [0, 600], 'y': [0, 400], 'color': 'lightblue'},
-        'Soldadoras (Rotays)': {'x': [600, 1000], 'y': [0, 400], 'color': 'lightgreen'},
-        'Ensamble Final': {'x': [0, 400], 'y': [400, 800], 'color': 'lightyellow'},
-        'Almacén MP': {'x': [400, 800], 'y': [400, 800], 'color': 'lightcoral'},
-        'Oficinas Técnicas': {'x': [800, 1000], 'y': [400, 600], 'color': 'lavender'},
-        'Taller Mantenimiento': {'x': [800, 1000], 'y': [600, 800], 'color': 'wheat'},
-        'Vestidores': {'x': [0, 200], 'y': [800, 1000], 'color': 'lightgray'},
-        'Laboratorio': {'x': [200, 600], 'y': [800, 1000], 'color': 'lightpink'}
-    }
+    y_labels = []
+    y_positions = []
+    for i, (_, row) in enumerate(df_display.iterrows()):
+        y = i  # posición
+        y_labels.append(f"{row['task']}  ({row['responsible_list']})")
+        y_positions.append(y)
+        start = row['start_date']
+        end = row['due_date']
+        total = (end - start).days if (end - start).days>0 else 1
+        prog = int(row.get('progress',0) or 0)
 
-    # Dibujar áreas CON HOVER MEJORADO
-    for area_name, area_coords in areas_planta.items():
-        # Calcular centro del área para posicionar el texto
-        center_x = (area_coords['x'][0] + area_coords['x'][1]) / 2
-        center_y = (area_coords['y'][0] + area_coords['y'][1]) / 2
-
-        # Área con hover
-        fig.add_trace(go.Scatter(
-            x=[area_coords['x'][0], area_coords['x'][1], area_coords['x'][1], area_coords['x'][0], area_coords['x'][0]],
-            y=[area_coords['y'][0], area_coords['y'][0], area_coords['y'][1], area_coords['y'][1], area_coords['y'][0]],
-            fill="toself",
-            fillcolor=area_coords['color'],
-            opacity=0.2,
-            line=dict(color="gray", width=1),
-            name=area_name,
-            showlegend=True,
-            hoverinfo="text",
-            hovertext=f"""
-            <b>🏭 {area_name}</b><br>
-            📏 Dimensiones: {area_coords['x'][1]-area_coords['x'][0]}x{area_coords['y'][1]-area_coords['y'][0]}<br>
-            📍 Coordenadas: ({area_coords['x'][0]}-{area_coords['x'][1]}, {area_coords['y'][0]}-{area_coords['y'][1]})
-            """,
-            text=""
-        ))
-
-        # Texto del área centrado (sin hover)
-        fig.add_trace(go.Scatter(
-            x=[center_x],
-            y=[center_y],
-            mode='text',
-            text=area_name,
-            textfont=dict(
-                color='black',
-                size=12,
-                family="Arial",
-                weight="bold"
-            ),
+        # Barra principal (desvanecida)
+        fig.add_trace(go.Bar(
+            x=[(end - start).days],
+            y=[y],
+            base=[start],
+            orientation='h',
+            marker=dict(color='rgba(200,200,200,0.3)', line=dict(width=0)),
             showlegend=False,
             hoverinfo='skip'
         ))
 
-    # Agregar máquinas CON HOVER DETALLADO
-    for _, maquina in df_machines.iterrows():
-        # Contar tareas asociadas a esta máquina
-        tareas_maquina = tareas_activas[
-            (tareas_activas['task'].str.contains(maquina['machine_name'], na=False, case=False)) |
-            (tareas_activas['description'].str.contains(maquina['machine_name'], na=False, case=False))
-        ]
-        num_tareas = len(tareas_maquina)
+        # Barra de progreso encima
+        prog_width = (end - start) * (prog/100)
+        prog_end = start + prog_width
+        color = priority_map.get(row.get('priority'), None) if color_mode=='priority' else None
 
-        # Obtener información detallada de tareas
-        tareas_info = ""
-        if num_tareas > 0:
-            tareas_info = "<br>📋 <b>Tareas Activas:</b>"
-            for i, (_, tarea) in enumerate(tareas_maquina.head(3).iterrows()):  # Mostrar máximo 3 tareas
-                estado_icono = {
-                    'Por hacer': '🔴',
-                    'En proceso': '🟡',
-                    'Hecho': '🟢'
-                }.get(tarea['status'], '⚪')
-
-                tareas_info += f"<br>{estado_icono} {tarea['task']} ({tarea['progress']}%)"
-
-            if num_tareas > 3:
-                tareas_info += f"<br>... y {num_tareas - 3} más"
-
-        # Definir color según estado y tareas pendientes
-        if num_tareas > 0:
-            color = '#FF4444'  # Rojo - con tareas pendientes
-            estado_emoji = '🔴'
-        elif maquina['status'] == 'Operativa':
-            color = '#44FF44'  # Verde - operativa
-            estado_emoji = '🟢'
-        elif maquina['status'] == 'Mantenimiento':
-            color = '#FFFF44'  # Amarillo - en mantenimiento
-            estado_emoji = '🟡'
-        else:
-            color = '#888888'  # Gris - inactiva
-            estado_emoji = '⚪'
-
-        # HOVER DETALLADO para máquinas
-        hover_info = f"""
-        <b>🔧 {maquina['machine_name']}</b><br>
-        {estado_emoji} <b>Estado:</b> {maquina['status']}<br>
-        🏭 <b>Área:</b> {maquina['area']}<br>
-        📍 <b>Posición:</b> ({maquina['coord_x']}, {maquina['coord_y']})<br>
-        📊 <b>Tareas activas:</b> {num_tareas}
-        {tareas_info}
-        """
-
-        if maquina.get('machine_type'):
-            hover_info += f"<br>⚙️ <b>Tipo:</b> {maquina['machine_type']}"
-
-        if maquina.get('last_maintenance') and str(maquina['last_maintenance']) != 'N/A':
-            hover_info += f"<br>📅 <b>Último mantenimiento:</b> {maquina['last_maintenance']}"
-
-        if maquina.get('next_maintenance') and str(maquina['next_maintenance']) != 'N/A':
-            hover_info += f"<br>⏰ <b>Próximo mantenimiento:</b> {maquina['next_maintenance']}"
-
-        fig.add_trace(go.Scatter(
-            x=[maquina['coord_x']],
-            y=[maquina['coord_y']],
-            mode='markers+text',
-            marker=dict(
-                size=25,
-                color=color,
-                symbol='square',
-                line=dict(width=2, color='black'),
-                opacity=0.9
-            ),
-            text=maquina['machine_name'],
-            textposition="top center",
-            textfont=dict(
-                color="black",
-                size=10,
-                family="Arial"
-            ),
-            name=maquina['machine_name'],
-            hovertemplate=hover_info + "<extra></extra>",
-            # Configuración del hover para mejor legibilidad
-            hoverlabel=dict(
-                bgcolor="white",
-                bordercolor="gray",
-                font=dict(
-                    color="black",
-                    size=12,
-                    family="Arial"
-                ),
-                align="left"
+        fig.add_trace(go.Bar(
+            x=[(prog_end - start).days if (prog_end - start).days>0 else 0.2],
+            y=[y],
+            base=[start],
+            orientation='h',
+            marker=dict(color=color or 'steelblue'),
+            name=row['task'],
+            hovertemplate=(
+                f"<b>{row['task']}</b><br>"
+                f"Responsable: {row['responsible_list']}<br>"
+                f"Inicio: {start.date()}<br>"
+                f"Fin: {end.date()}<br>"
+                f"Progreso: {prog}%<br>"
+                f"Prioridad: {row.get('priority','')}"
             )
         ))
 
-    # Configurar el plano
+    # Layout
     fig.update_layout(
-        title="Plano de Planta - Distribución Real",
-        height=700,
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 1000]),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 1000]),
-        showlegend=True,
-        plot_bgcolor='white',
-        # Configuración global del hover
-        hoverlabel=dict(
-            bgcolor="white",
-            bordercolor="gray",
-            font_size=12,
-            font_family="Arial",
-            font_color="black",
-            align="left"
-        )
+        barmode='overlay',
+        height= max(400, 30*len(df_display)),
+        yaxis=dict(
+            tickmode='array',
+            tickvals=y_positions,
+            ticktext=y_labels[::-1],  # invertimos para visual ms project
+            autorange='reversed'
+        ),
+        xaxis=dict(
+            type='date',
+            tickformat='%Y-%m-%d',
+            showgrid=True
+        ),
+        margin=dict(l=350, r=20, t=50, b=50)
     )
+
+    # Línea de hoy tenue
+    fig.add_vline(x=pd.Timestamp(datetime.now().date()), line_width=1, line_dash="dash", line_color="red", opacity=0.6)
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # Instrucciones para el usuario
-    st.markdown("""
-    **🔍 Información interactiva:**
-    - **Pasa el mouse sobre las áreas** para ver detalles del departamento
-    - **Pasa el mouse sobre las máquinas** para ver información detallada
-    - **Haz clic en los elementos** de la leyenda para filtrar
-    """)
+def tab_gantt_aggrid():
+    """
+    Pestaña Gantt corporativo: AG-GRID editable (izquierda) + Gantt Plotly (derecha).
+    Permite CRUD: crear, editar, borrar, guardar (sin drag directo sobre barras).
+    """
+    st.header("📆 Gantt Corporativo — Tabla + Timeline")
+    st.markdown("Tabla editable a la izquierda (CRUD completo). Gantt a la derecha. Para mover fechas arrastra en la tabla o edítalas directamente.")
 
-    # Panel de información detallada (opcional, puedes mantenerlo o quitarlo)
-    st.markdown("---")
-    st.subheader("📋 Detalle Completo de Máquinas")
+    # Cargar datos
+    df_tasks = st.session_state.all_tasks_df.copy()
+    if df_tasks.empty:
+        st.info("No hay tareas para mostrar. Crea una tarea primero.")
+        return
 
-    for _, maquina in df_machines.iterrows():
-        tareas_maquina = tareas_activas[
-            (tareas_activas['task'].str.contains(maquina['machine_name'], na=False, case=False)) |
-            (tareas_activas['description'].str.contains(maquina['machine_name'], na=False, case=False))
-        ]
+    # Normalizar responsable_list a strings para AgGrid
+    def rl_to_str(x):
+        if isinstance(x, list):
+            return ", ".join(x)
+        return x if pd.notna(x) else ""
 
-        with st.expander(f"🔧 {maquina['machine_name']} - {maquina['area']} ({len(tareas_maquina)} tareas)"):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write(f"**Tipo:** {maquina.get('machine_type', 'N/A')}")
-                st.write(f"**Estado:** {maquina['status']}")
-                st.write(f"**Último mantenimiento:** {maquina.get('last_maintenance', 'N/A')}")
-                st.write(f"**Próximo mantenimiento:** {maquina.get('next_maintenance', 'N/A')}")
-                st.write(f"**Coordenadas:** ({maquina['coord_x']}, {maquina['coord_y']})")
+    df_tasks['responsible_str'] = df_tasks['responsible_list'].apply(rl_to_str)
+    # Asegurar columnas obligatorias
+    cols_needed = ['id','task','description','date','priority','shift','start_date','due_date','status','progress','created_by','document_links','responsible_str']
+    for c in cols_needed:
+        if c not in df_tasks.columns:
+            df_tasks[c] = ''
 
-            with col2:
-                if len(tareas_maquina) > 0:
-                    st.warning(f"⚠️ {len(tareas_maquina)} tareas activas")
-                    for _, tarea in tareas_maquina.iterrows():
-                        estado_color = {
-                            'Por hacer': '🔴',
-                            'En proceso': '🟡',
-                            'Hecho': '🟢'
-                        }.get(tarea['status'], '⚪')
+    # Construir layout con columnas (izq tabla, der gantt)
+    left, right = st.columns([1,2])
+    with left:
+        st.subheader("Tabla editable (CRUD)")
 
-                        st.write(f"{estado_color} **{tarea['task']}** - {tarea['progress']}%")
-                        if tarea.get('description'):
-                            st.caption(f"_{tarea['description']}_")
-                else:
-                    st.success("✅ Sin tareas activas")
+        gb = GridOptionsBuilder.from_dataframe(df_tasks[cols_needed])
+        gb.configure_default_column(editable=True, groupable=False)
+        # Hacer columnas de fecha como editor tipo date
+        gb.configure_column("start_date", editable=True, type=["dateColumnFilter","customDateTimeFormat"], custom_format_string='yyyy-MM-dd')
+        gb.configure_column("due_date", editable=True, type=["dateColumnFilter","customDateTimeFormat"], custom_format_string='yyyy-MM-dd')
+        # Progreso como número y rango
+        gb.configure_column("progress", editable=True, cellEditor='agNumberCellEditor')
+        # Habilitar selección de filas
+        gb.configure_selection(selection_mode="single", use_checkbox=True)
+        # Botones rápidos: agregar y borrar
+        gridOptions = gb.build()
 
-def configurar_plano_plantas():
-    """Interfaz para configurar las máquinas en el plano"""
-    st.header("⚙️ Configurar Plano de Planta")
-    st.markdown("---")
+        grid_response = AgGrid(
+            df_tasks[cols_needed],
+            gridOptions=gridOptions,
+            enable_enterprise_modules=False,
+            update_mode=GridUpdateMode.MODEL_CHANGED,
+            fit_columns_on_grid_load=False,
+            height=400,
+            reload_data=False
+        )
 
-    st.info("""
-    **Instrucciones:**
-    1. Define las áreas de tu planta en el código (coordenadas fijas)
-    2. Agrega las máquinas con sus coordenadas exactas
-    3. Las tareas se vincularán automáticamente por nombre de máquina
-    """)
+        # Botones CRUD
+        st.markdown("---")
+        col_add, col_save, col_del, col_reload = st.columns(4)
+        with col_add:
+            if st.button("➕ Nueva tarea"):
+                # Crear fila por defecto
+                new_id = int(df_tasks['id'].max() + 1) if not df_tasks.empty else 1
+                new_row = {c: '' for c in cols_needed}
+                new_row['id'] = new_id
+                new_row['task'] = f"Nueva tarea {new_id}"
+                new_row['start_date'] = date.today().strftime("%Y-%m-%d")
+                new_row['due_date'] = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+                new_row['progress'] = 0
+                new_row['status'] = 'Por hacer'
+                df_tasks = pd.concat([df_tasks, pd.DataFrame([new_row])], ignore_index=True)
+                # Guardar temporal en session para re-render
+                st.session_state.all_tasks_df = df_tasks
+                st.rerun()
 
-    # Mostrar estructura actual
-    st.subheader("Estructura actual del plano")
+        with col_save:
+            if st.button("💾 Guardar cambios"):
+                # tomamos los datos devueltos por AgGrid
+                updated = grid_response['data']
+                df_updated = pd.DataFrame(updated)
+                # convertir responsible_str a lista
+                df_updated['responsible_list'] = df_updated['responsible_str'].apply(lambda x: [u.strip() for u in str(x).split(',') if u.strip()])
+                # asegurar tipos y columnas
+                # Guardar en Google Sheets usando función
+                apply_updates_to_google_sheets(df_updated)
+                # recargar
+                load_tasks_from_db()
+        # with col_del:
+        #     if st.button("🗑️ Borrar seleccionada"):
+        #         selected = grid_response.get("selected_rows", [])
 
-    areas_planta = {
-        'Producción': '0-400, 0-300',
-        'Ensamblaje': '400-800, 0-300',
-        'Control Calidad': '0-400, 300-600',
-        'Almacén': '400-800, 300-600',
-        'Oficinas': '800-1000, 0-200',
-        'Mantenimiento': '800-1000, 200-600'
-    }
+        #         # Normalizar seleccionados
+        #         if selected is None:
+        #             st.warning("Selecciona una fila para borrar.")
+        #             return
 
-    st.write("**Áreas definidas:**")
-    for area, coords in areas_planta.items():
-        st.write(f"- {area}: {coords}")
+        #         if isinstance(selected, pd.DataFrame):
+        #             if selected.empty:
+        #                 st.warning("Selecciona una fila para borrar.")
+        #                 return
+        #             selected = selected.to_dict("records")
 
-    # Gestión de máquinas existentes
-    st.subheader("Máquinas Registradas")
+        #         if not isinstance(selected, list) or len(selected) == 0:
+        #             st.warning("Selecciona una fila para borrar.")
+        #             return
 
-    df_machines = cargar_maquinas_desde_db()
+        #         sel = selected[0]
 
-    if not df_machines.empty:
-        st.write(f"**Total de máquinas:** {len(df_machines)}")
+        #         # Validar ID
+        #         if "id" not in sel:
+        #             st.error("La tarea seleccionada no tiene ID válido.")
+        #             return
 
-        # Mostrar máquinas por área
-        for area in df_machines['area'].unique():
-            maquinas_area = df_machines[df_machines['area'] == area]
-            with st.expander(f"📁 {area} ({len(maquinas_area)} máquinas)"):
-                for _, maquina in maquinas_area.iterrows():
-                    st.write(f"• **{maquina['machine_name']}** - {maquina['status']} - ({maquina['coord_x']}, {maquina['coord_y']})")
-    else:
-        st.warning("No hay máquinas registradas. Usa el formulario below para agregar la primera máquina.")
+        #         sel_id = int(sel["id"])
 
-    # Formulario para agregar máquinas
-    st.markdown("---")
-    st.subheader("Agregar Nueva Máquina")
+        #         # 🔥 TOMAR EL DATAFRAME REAL, NO EL DEL GRID
+        #         df_real = st.session_state.all_tasks_df.copy()
 
-    with st.form("agregar_maquina"):
-        col1, col2 = st.columns(2)
-        with col1:
-            nombre = st.text_input("Nombre de la máquina*")
-            area = st.selectbox("Área*", list(areas_planta.keys()))
-            tipo = st.selectbox("Tipo", ["Producción", "Ensamblaje", "Control", "Almacenamiento", "Otro"])
+        #         # 🔥 Convertir responsible_list si viene como string
+        #         def fix_rl(x):
+        #             if isinstance(x, list):
+        #                 return x
+        #             if isinstance(x, str) and x.strip():
+        #                 return [u.strip() for u in x.split(",") if u.strip()]
+        #             return []
 
-        with col2:
-            coord_x = st.number_input("Coordenada X*", 0, 1000, 100)
-            coord_y = st.number_input("Coordenada Y*", 0, 600, 100)
-            estado = st.selectbox("Estado*", ["Operativa", "Mantenimiento", "Inactiva"])
-            proximo_mantenimiento = st.date_input("Próximo mantenimiento", value=date.today() + timedelta(days=30))
+        #         df_real["responsible_list"] = df_real["responsible_list"].apply(fix_rl)
 
-        if st.form_submit_button("✅ Agregar Máquina al Plano"):
-            if nombre and area:
-                maquina_data = {
-                    'machine_name': nombre,
-                    'area': area,
-                    'coord_x': coord_x,
-                    'coord_y': coord_y,
-                    'machine_type': tipo,
-                    'status': estado,
-                    'last_maintenance': date.today().strftime("%Y-%m-%d"),
-                    'next_maintenance': proximo_mantenimiento.strftime("%Y-%m-%d")
-                }
+        #         # 🔥 ELIMINAR LA TAREA DEL DF REAL
+        #         df_real = df_real[df_real["id"].astype(int) != sel_id].copy()
 
-                if guardar_maquina_en_db(maquina_data):
-                    st.success(f"✅ Máquina '{nombre}' agregada exitosamente al plano")
-                    st.rerun()
-                else:
-                    st.error("❌ Error al guardar la máquina")
-            else:
-                st.error("❌ Completa los campos obligatorios")
+        #         # 🔥 LIMPIAR PARA GUARDAR
+        #         df_real = df_real.fillna("")
+
+        #         # 🔥 GUARDAR CORRECTAMENTE A GOOGLE SHEETS
+        #         apply_updates_to_google_sheets(df_real)
+
+        #         # 🔥 RECARGAR DATOS
+        #         load_tasks_from_db()
+
+        #         st.success("La tarea fue eliminada correctamente.")
+        #         st.rerun()
+
+
+
+
+        with col_reload:
+            if st.button("🔄 Recargar datos"):
+                load_tasks_from_db()
+                st.rerun()
+
+
+    # RIGHT: Gantt
+    with right:
+        st.subheader("Gantt (vista)")
+        # Para la vista del gantt, reconstruimos DataFrame con responsible_list como string
+        df_for_gantt = st.session_state.all_tasks_df.copy()
+
+        # Verificar que AgGrid devolvió datos válidos
+        if (
+            'data' in grid_response
+            and grid_response['data'] is not None
+            and isinstance(grid_response['data'], (list, dict, pd.DataFrame))
+            and len(grid_response['data']) > 0
+        ):
+            tmp = pd.DataFrame(grid_response['data'])
+
+            # Reconstruir tipos y columnas
+            tmp['start_date'] = tmp['start_date']
+            tmp['due_date'] = tmp['due_date']
+            tmp['responsible_list'] = tmp['responsible_str'].apply(
+                lambda x: x if not pd.isna(x) else "Sin asignar"
+            )
+            tmp['progress'] = pd.to_numeric(tmp['progress'], errors='coerce').fillna(0).astype(int)
+            df_for_gantt = tmp
+
+
+        # Selector de color
+        color_choice = st.radio("Colorear por:", ["Prioridad","Responsable"], horizontal=True)
+        color_mode = 'priority' if color_choice=='Prioridad' else 'responsible_list'
+        render_corporate_gantt(df_for_gantt, color_mode=color_mode)
+
+
+
 
 # -------------------------
 # Procesamiento de imágenes
@@ -1003,14 +943,20 @@ def main_app():
     admin_roles = ["admin principal", "supervisor", "coordinador"]
     is_admin = (st.session_state.current_role or "").lower() in admin_roles
 
-    # tabs - MODIFICADO: Agregar pestaña de plano permanente
-    tab_names = ["📋 Tablero Kanban", "🗺️ Plano de Planta"]
+    # tabs - MODIFICADO: Agregar pestaña diagrama de gantt
+    tab_names = ["📋 Tablero Kanban", "📆 Diagrama de Gantt"]
     if is_admin:
         tab_names.insert(0, "➕ Agregar Tarea")
-        tab_names.append("⚙️ Configurar Plano")  # Nueva pestaña para admin
         tab_names.append("📊 Estadísticas")
         tab_names.append("⚙️ Gestión Usuarios")
     tabs = st.tabs(tab_names)
+
+    # --- Pestaña: Diagrama de Gantt ---
+    with tabs[tab_names.index("📆 Diagrama de Gantt")]:
+        tab_gantt_aggrid()  # <- esta funcion va justo de bajo.
+
+
+
 
     # --- Agregar Tarea (admin) ---
     if is_admin and "➕ Agregar Tarea" in tab_names:
@@ -1187,14 +1133,7 @@ def main_app():
                                         add_task_interaction(int(task['id']), st.session_state.username, 'status_change' if submit_completar else 'progress_update', comment_text=comentario, image_base64=imagen_b64, new_status=nuevo_estado, progress_value=int(nuevo_progreso))
                                         st.rerun()
 
-    # --- Pestaña: Plano de Planta ---
-    with tabs[tab_names.index("🗺️ Plano de Planta")]:
-        mostrar_plano_permanente()
 
-    # --- Pestaña: Configurar Plano (Solo admin) ---
-    if is_admin and "⚙️ Configurar Plano" in tab_names:
-        with tabs[tab_names.index("⚙️ Configurar Plano")]:
-            configurar_plano_plantas()
 
      # --- Pestaña: Estadísticas (Solo admin) ---
     if is_admin and "📊 Estadísticas" in tab_names:
