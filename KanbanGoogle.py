@@ -181,9 +181,15 @@ def load_tasks_from_db():
                 task_id = int(task['id'])
                 responsables = []
                 if not df_collab.empty:
-                    responsables = df_collab[df_collab['task_id']==task_id]['username'].tolist()
+                    # Filtra solo las filas para el task_id y extrae la columna 'username'
+                    responsables_raw = df_collab[df_collab['task_id']==task_id]['username'].tolist()
+                    
+                    # CORRECCIÓN: Convierte cada elemento a string, manejando los NaNs o vacíos
+                    # Usamos str(x) para forzar la conversión, y luego strip() para limpiar espacios
+                    responsables = [str(r).strip() for r in responsables_raw if pd.notna(r) and str(r).strip()]
+                
                 task['responsible_list'] = responsables
-                task['responsible'] = ", ".join(responsables)
+                task['responsible'] = ", ".join(responsables) # Ahora 'responsables' es una lista de strings limpios
                 interacciones = []
                 if not df_inter.empty:
                     interacciones = df_inter[df_inter['task_id']==task_id].to_dict('records')
@@ -1385,5 +1391,6 @@ def run():
 
 if __name__ == "__main__":
     run()
+
 
 
