@@ -8,6 +8,7 @@ Created on Tue Oct  7 10:13:35 2025
 
 
 
+
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime
@@ -21,7 +22,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from PIL import Image
 import base64
 import os
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+# from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 
 
 # ---------------------------
@@ -183,11 +184,11 @@ def load_tasks_from_db():
                 if not df_collab.empty:
                     # Filtra solo las filas para el task_id y extrae la columna 'username'
                     responsables_raw = df_collab[df_collab['task_id']==task_id]['username'].tolist()
-                    
+
                     # CORRECCIÓN: Convierte cada elemento a string, manejando los NaNs o vacíos
                     # Usamos str(x) para forzar la conversión, y luego strip() para limpiar espacios
                     responsables = [str(r).strip() for r in responsables_raw if pd.notna(r) and str(r).strip()]
-                
+
                 task['responsible_list'] = responsables
                 task['responsible'] = ", ".join(responsables) # Ahora 'responsables' es una lista de strings limpios
                 interacciones = []
@@ -371,325 +372,7 @@ def recalc_task_progress(task_id):
         update_task_status_in_db(task_id, None, progress=int(avg_progress))
 
 
-# ---------- REQUIERE: pip install streamlit-aggrid ----------
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 
-def apply_updates_to_google_sheets(df_updated):
-    """
-    Actualiza la hoja 'tasks' y 'task_collaborators' leyendo df_updated.
-    df_updated debe contener: id, task, description, date, priority, shift, start_date, due_date, status, completion_date, progress, created_by, document_links, responsible_list (string o list)
-    """
-    try:
-        sheet = get_gsheet_connection()
-        ws_tasks = sheet.worksheet("tasks")
-        # Cuidado con las columnas: reconstruimos el df_tasks con el mismo orden que la sheet
-        df_tasks_sheet = get_as_dataframe(ws_tasks)
-        # Convertir responsible_list a string (linea por linea) para guardarlo en collaborators hoja separada
-        # Primero actualizar tasks sheet (sin collaborators)
-        save_cols = ['id','task','description','date','priority','shift','start_date','due_date','status','completion_date','progress','created_by','document_links']
-        # Asegurar que existan todas las columnas
-        for c in save_cols:
-            if c not in df_updated.columns:
-                df_updated[c] = None
-        df_to_save = df_updated[save_cols].copy()
-        # Convertir NaN en empty
-        df_to_save = df_to_save.fillna('')
-        set_with_dataframe(ws_tasks, df_to_save)
-
-        # Ahora actualizar task_collaborators: vamos a recrearla desde responsible_list
-        ws_collab = sheet.worksheet("task_collaborators")
-        collab_rows = []
-        for _, r in df_updated.iterrows():
-            tid = int(r['id'])
-            rl = r.get('responsible_list', '')
-            if isinstance(rl, list):
-                for u in rl:
-                    collab_rows.append({'task_id': tid, 'username': u})
-            else:
-                # si es string separada por comas
-                if isinstance(rl, str) and rl.strip():
-                    for u in [x.strip() for x in rl.split(',') if x.strip()]:
-                        collab_rows.append({'task_id': tid, 'username': u})
-        df_collab_save = pd.DataFrame(collab_rows) if collab_rows else pd.DataFrame(columns=['task_id','username'])
-        set_with_dataframe(ws_collab, df_collab_save)
-        st.success("Cambios guardados en Google Sheets.")
-    except Exception as e:
-        st.error(f"Error guardando en Google Sheets: {e}")
-
-def render_corporate_gantt(df_display, color_mode='priority'):
-    """
-    Dibuja un Gantt estilo corporativo con Plotly utilizando df_display
-    df_display debe tener start_date, due_date, task, progress, priority, responsible_list, status
-    """
-    import plotly.express as px
-    import plotly.graph_objects as go
-
-    # Preparar barras (una fila por tarea)
-    df_display['start_date'] = pd.to_datetime(df_display['start_date'], errors='coerce')
-    df_display['due_date'] = pd.to_datetime(df_display['due_date'], errors='coerce')
-    df_display = df_display.dropna(subset=['start_date', 'due_date']).copy()
-    if df_display.empty:
-        st.info("No hay tareas con fechas para mostrar en el Gantt.")
-        return
-
-    # Orden por responsable y fecha inicio
-    df_display = df_display.sort_values(['responsible_list','start_date'])
-
-    # Color mapping por prioridad para consistencia corporativa
-    priority_map = {'Alta':'#d9534f', 'Media':'#f0ad4e', 'Baja':'#5bc0de'}
-    if color_mode == 'priority':
-        color_arg = 'priority'
-    else:
-        color_arg = 'responsible_list'
-
-    fig = go.Figure()
-
-    y_labels = []
-    y_positions = []
-    for i, (_, row) in enumerate(df_display.iterrows()):
-        y = i  # posición
-        y_labels.append(f"{row['task']}  ({row['responsible_list']})")
-        y_positions.append(y)
-        start = row['start_date']
-        end = row['due_date']
-        total = (end - start).days if (end - start).days>0 else 1
-        prog = int(row.get('progress',0) or 0)
-
-        # Barra principal (desvanecida)
-        fig.add_trace(go.Bar(
-            x=[(end - start).days],
-            y=[y],
-            base=[start],
-            orientation='h',
-            marker=dict(color='rgba(200,200,200,0.3)', line=dict(width=0)),
-            showlegend=False,
-            hoverinfo='skip'
-        ))
-
-        # Barra de progreso encima
-        prog_width = (end - start) * (prog/100)
-        prog_end = start + prog_width
-        color = priority_map.get(row.get('priority'), None) if color_mode=='priority' else None
-
-        fig.add_trace(go.Bar(
-            x=[(prog_end - start).days if (prog_end - start).days>0 else 0.2],
-            y=[y],
-            base=[start],
-            orientation='h',
-            marker=dict(color=color or 'steelblue'),
-            name=row['task'],
-            hovertemplate=(
-                f"<b>{row['task']}</b><br>"
-                f"Responsable: {row['responsible_list']}<br>"
-                f"Inicio: {start.date()}<br>"
-                f"Fin: {end.date()}<br>"
-                f"Progreso: {prog}%<br>"
-                f"Prioridad: {row.get('priority','')}"
-            )
-        ))
-
-    # Layout
-    fig.update_layout(
-        barmode='overlay',
-        height= max(400, 30*len(df_display)),
-        yaxis=dict(
-            tickmode='array',
-            tickvals=y_positions,
-            ticktext=y_labels[::-1],  # invertimos para visual ms project
-            autorange='reversed'
-        ),
-        xaxis=dict(
-            type='date',
-            tickformat='%Y-%m-%d',
-            showgrid=True
-        ),
-        margin=dict(l=350, r=20, t=50, b=50)
-    )
-
-    # Línea de hoy tenue
-    fig.add_vline(x=pd.Timestamp(datetime.now().date()), line_width=1, line_dash="dash", line_color="red", opacity=0.6)
-
-    st.plotly_chart(fig, use_container_width=True)
-
-def tab_gantt_aggrid():
-    """
-    Pestaña Gantt corporativo: AG-GRID editable (izquierda) + Gantt Plotly (derecha).
-    Permite CRUD: crear, editar, borrar, guardar (sin drag directo sobre barras).
-    """
-    st.header("📆 Gantt Corporativo — Tabla + Timeline")
-    st.markdown("Tabla editable a la izquierda (CRUD completo). Gantt a la derecha. Para mover fechas arrastra en la tabla o edítalas directamente.")
-
-    # Cargar datos
-    df_tasks = st.session_state.all_tasks_df.copy()
-    if df_tasks.empty:
-        st.info("No hay tareas para mostrar. Crea una tarea primero.")
-        return
-
-    # Normalizar responsable_list a strings para AgGrid
-    def rl_to_str(x):
-        if isinstance(x, list):
-            return ", ".join(x)
-        return x if pd.notna(x) else ""
-
-    df_tasks['responsible_str'] = df_tasks['responsible_list'].apply(rl_to_str)
-    # Asegurar columnas obligatorias
-    cols_needed = ['id','task','description','date','priority','shift','start_date','due_date','status','progress','created_by','document_links','responsible_str']
-    for c in cols_needed:
-        if c not in df_tasks.columns:
-            df_tasks[c] = ''
-
-    # Construir layout con columnas (izq tabla, der gantt)
-    left, right = st.columns([1,2])
-    with left:
-        st.subheader("Tabla editable (CRUD)")
-
-        gb = GridOptionsBuilder.from_dataframe(df_tasks[cols_needed])
-        gb.configure_default_column(editable=True, groupable=False)
-        # Hacer columnas de fecha como editor tipo date
-        gb.configure_column("start_date", editable=True, type=["dateColumnFilter","customDateTimeFormat"], custom_format_string='yyyy-MM-dd')
-        gb.configure_column("due_date", editable=True, type=["dateColumnFilter","customDateTimeFormat"], custom_format_string='yyyy-MM-dd')
-        # Progreso como número y rango
-        gb.configure_column("progress", editable=True, cellEditor='agNumberCellEditor')
-        # Habilitar selección de filas
-        gb.configure_selection(selection_mode="single", use_checkbox=True)
-        # Botones rápidos: agregar y borrar
-        gridOptions = gb.build()
-
-        grid_response = AgGrid(
-            df_tasks[cols_needed],
-            gridOptions=gridOptions,
-            enable_enterprise_modules=False,
-            update_mode=GridUpdateMode.MODEL_CHANGED,
-            fit_columns_on_grid_load=False,
-            height=400,
-            reload_data=False
-        )
-
-        # Botones CRUD
-        st.markdown("---")
-        col_add, col_save, col_del, col_reload = st.columns(4)
-        with col_add:
-            if st.button("➕ Nueva tarea"):
-                # Crear fila por defecto
-                new_id = int(df_tasks['id'].max() + 1) if not df_tasks.empty else 1
-                new_row = {c: '' for c in cols_needed}
-                new_row['id'] = new_id
-                new_row['task'] = f"Nueva tarea {new_id}"
-                new_row['start_date'] = date.today().strftime("%Y-%m-%d")
-                new_row['due_date'] = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
-                new_row['progress'] = 0
-                new_row['status'] = 'Por hacer'
-                df_tasks = pd.concat([df_tasks, pd.DataFrame([new_row])], ignore_index=True)
-                # Guardar temporal en session para re-render
-                st.session_state.all_tasks_df = df_tasks
-                st.rerun()
-
-        with col_save:
-            if st.button("💾 Guardar cambios"):
-                # tomamos los datos devueltos por AgGrid
-                updated = grid_response['data']
-                df_updated = pd.DataFrame(updated)
-                # convertir responsible_str a lista
-                df_updated['responsible_list'] = df_updated['responsible_str'].apply(lambda x: [u.strip() for u in str(x).split(',') if u.strip()])
-                # asegurar tipos y columnas
-                # Guardar en Google Sheets usando función
-                apply_updates_to_google_sheets(df_updated)
-                # recargar
-                load_tasks_from_db()
-        # with col_del:
-        #     if st.button("🗑️ Borrar seleccionada"):
-        #         selected = grid_response.get("selected_rows", [])
-
-        #         # Normalizar seleccionados
-        #         if selected is None:
-        #             st.warning("Selecciona una fila para borrar.")
-        #             return
-
-        #         if isinstance(selected, pd.DataFrame):
-        #             if selected.empty:
-        #                 st.warning("Selecciona una fila para borrar.")
-        #                 return
-        #             selected = selected.to_dict("records")
-
-        #         if not isinstance(selected, list) or len(selected) == 0:
-        #             st.warning("Selecciona una fila para borrar.")
-        #             return
-
-        #         sel = selected[0]
-
-        #         # Validar ID
-        #         if "id" not in sel:
-        #             st.error("La tarea seleccionada no tiene ID válido.")
-        #             return
-
-        #         sel_id = int(sel["id"])
-
-        #         # 🔥 TOMAR EL DATAFRAME REAL, NO EL DEL GRID
-        #         df_real = st.session_state.all_tasks_df.copy()
-
-        #         # 🔥 Convertir responsible_list si viene como string
-        #         def fix_rl(x):
-        #             if isinstance(x, list):
-        #                 return x
-        #             if isinstance(x, str) and x.strip():
-        #                 return [u.strip() for u in x.split(",") if u.strip()]
-        #             return []
-
-        #         df_real["responsible_list"] = df_real["responsible_list"].apply(fix_rl)
-
-        #         # 🔥 ELIMINAR LA TAREA DEL DF REAL
-        #         df_real = df_real[df_real["id"].astype(int) != sel_id].copy()
-
-        #         # 🔥 LIMPIAR PARA GUARDAR
-        #         df_real = df_real.fillna("")
-
-        #         # 🔥 GUARDAR CORRECTAMENTE A GOOGLE SHEETS
-        #         apply_updates_to_google_sheets(df_real)
-
-        #         # 🔥 RECARGAR DATOS
-        #         load_tasks_from_db()
-
-        #         st.success("La tarea fue eliminada correctamente.")
-        #         st.rerun()
-
-
-
-
-        with col_reload:
-            if st.button("🔄 Recargar datos"):
-                load_tasks_from_db()
-                st.rerun()
-
-
-    # RIGHT: Gantt
-    with right:
-        st.subheader("Gantt (vista)")
-        # Para la vista del gantt, reconstruimos DataFrame con responsible_list como string
-        df_for_gantt = st.session_state.all_tasks_df.copy()
-
-        # Verificar que AgGrid devolvió datos válidos
-        if (
-            'data' in grid_response
-            and grid_response['data'] is not None
-            and isinstance(grid_response['data'], (list, dict, pd.DataFrame))
-            and len(grid_response['data']) > 0
-        ):
-            tmp = pd.DataFrame(grid_response['data'])
-
-            # Reconstruir tipos y columnas
-            tmp['start_date'] = tmp['start_date']
-            tmp['due_date'] = tmp['due_date']
-            tmp['responsible_list'] = tmp['responsible_str'].apply(
-                lambda x: x if not pd.isna(x) else "Sin asignar"
-            )
-            tmp['progress'] = pd.to_numeric(tmp['progress'], errors='coerce').fillna(0).astype(int)
-            df_for_gantt = tmp
-
-
-        # Selector de color
-        color_choice = st.radio("Colorear por:", ["Prioridad","Responsable"], horizontal=True)
-        color_mode = 'priority' if color_choice=='Prioridad' else 'responsible_list'
-        render_corporate_gantt(df_for_gantt, color_mode=color_mode)
 
 
 
@@ -950,16 +633,14 @@ def main_app():
     is_admin = (st.session_state.current_role or "").lower() in admin_roles
 
     # tabs - MODIFICADO: Agregar pestaña diagrama de gantt
-    tab_names = ["📋 Tablero Kanban", "📆 Diagrama de Gantt"]
+    tab_names = ["📋 Tablero Kanban"]
     if is_admin:
         tab_names.insert(0, "➕ Agregar Tarea")
         tab_names.append("📊 Estadísticas")
         tab_names.append("⚙️ Gestión Usuarios")
     tabs = st.tabs(tab_names)
 
-    # --- Pestaña: Diagrama de Gantt ---
-    with tabs[tab_names.index("📆 Diagrama de Gantt")]:
-        tab_gantt_aggrid()  # <- esta funcion va justo de bajo.
+
 
 
 
@@ -1391,6 +1072,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-
-
-
