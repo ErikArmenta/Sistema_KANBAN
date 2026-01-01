@@ -8,7 +8,6 @@ Created on Tue Oct  7 10:13:35 2025
 
 
 
-
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime
@@ -73,7 +72,7 @@ def ensure_worksheets_exist():
     """Verifica y crea las hojas necesarias si no existen"""
     try:
         sheet = get_gsheet_connection()
-        required_sheets = ["tasks", "task_collaborators", "task_interactions", "users", "task_items", "plant_machines"]
+        required_sheets = ["tasks", "task_collaborators", "task_interactions", "users", "task_items", "plant_machines", "time_extension_requests"]
         existing_sheets = [ws.title for ws in sheet.worksheets()]
         for sheet_name in required_sheets:
             if sheet_name not in existing_sheets:
@@ -94,6 +93,10 @@ def ensure_worksheets_exist():
                 elif sheet_name == "plant_machines":
                     new_worksheet.update('A1', [['machine_id', 'machine_name', 'area', 'coord_x', 'coord_y',
                                                 'machine_type', 'status', 'last_maintenance', 'next_maintenance']])
+                elif sheet_name == "time_extension_requests":
+                    new_worksheet.update('A1', [['id', 'task_id', 'username', 'request_date',
+                                                'current_due_date', 'requested_due_date', 'reason',
+                                                'status', 'approved_by', 'decision_date']])
                 st.success(f"Hoja '{sheet_name}' creada automáticamente")
     except Exception as e:
         st.error(f"Error al verificar hojas: {str(e)}")
@@ -146,23 +149,26 @@ def login_user(username, password):
 # Operaciones con tareas, items, interacciones
 # ---------------------------
 def load_tasks_from_db():
-    """Carga tareas, colaboradores, interacciones y items; arma st.session_state.kanban y all_tasks_df"""
+    """Carga tareas, colaboradores, interacciones, items y extension requests; arma st.session_state.kanban y all_tasks_df"""
     try:
         sheet = get_gsheet_connection()
         ws_tasks = sheet.worksheet("tasks")
         ws_collab = sheet.worksheet("task_collaborators")
         ws_inter = sheet.worksheet("task_interactions")
         ws_items = sheet.worksheet("task_items")
+        ws_extension = sheet.worksheet("time_extension_requests")
 
         df_tasks_raw = get_as_dataframe(ws_tasks)
         df_collab_raw = get_as_dataframe(ws_collab)
         df_inter_raw = get_as_dataframe(ws_inter)
         df_items_raw = get_as_dataframe(ws_items)
+        df_extension_raw = get_as_dataframe(ws_extension)
 
         df_tasks = df_tasks_raw[df_tasks_raw.iloc[:, 0].notna()].copy() if not df_tasks_raw.empty else pd.DataFrame(columns=['id', 'task', 'description', 'date', 'priority', 'shift', 'start_date', 'due_date', 'status', 'completion_date', 'progress', 'created_by', 'document_links'])
         df_collab = df_collab_raw[df_collab_raw.iloc[:, 0].notna()].copy() if not df_collab_raw.empty else pd.DataFrame(columns=['task_id', 'username'])
         df_inter = df_inter_raw[df_inter_raw.iloc[:, 0].notna()].copy() if not df_inter_raw.empty else pd.DataFrame(columns=['id', 'task_id', 'username', 'action_type', 'timestamp', 'comment_text', 'image_base64', 'new_status', 'progress_value'])
         df_items = df_items_raw[df_items_raw.iloc[:, 0].notna()].copy() if not df_items_raw.empty else pd.DataFrame(columns=['id', 'task_id', 'item_name', 'status', 'progress', 'completion_date'])
+        df_extension = df_extension_raw[df_extension_raw.iloc[:, 0].notna()].copy() if not df_extension_raw.empty else pd.DataFrame(columns=['id', 'task_id', 'username', 'request_date', 'current_due_date', 'requested_due_date', 'reason', 'status', 'approved_by', 'decision_date'])
 
         kanban_data = {"Por hacer": [], "En proceso": [], "Hecho": []}
         all_tasks_list = []
@@ -176,6 +182,8 @@ def load_tasks_from_db():
                 df_inter['task_id'] = pd.to_numeric(df_inter['task_id'], errors='coerce').fillna(-1).astype(int)
             if not df_items.empty and 'task_id' in df_items.columns:
                 df_items['task_id'] = pd.to_numeric(df_items['task_id'], errors='coerce').fillna(-1).astype(int)
+            if not df_extension.empty and 'task_id' in df_extension.columns:
+                df_extension['task_id'] = pd.to_numeric(df_extension['task_id'], errors='coerce').fillna(-1).astype(int)
 
             for _, row in df_tasks.iterrows():
                 task = row.to_dict()
@@ -184,22 +192,27 @@ def load_tasks_from_db():
                 if not df_collab.empty:
                     # Filtra solo las filas para el task_id y extrae la columna 'username'
                     responsables_raw = df_collab[df_collab['task_id']==task_id]['username'].tolist()
-
-                    # CORRECCIÓN: Convierte cada elemento a string, manejando los NaNs o vacíos
-                    # Usamos str(x) para forzar la conversión, y luego strip() para limpiar espacios
                     responsables = [str(r).strip() for r in responsables_raw if pd.notna(r) and str(r).strip()]
 
                 task['responsible_list'] = responsables
-                task['responsible'] = ", ".join(responsables) # Ahora 'responsables' es una lista de strings limpios
+                task['responsible'] = ", ".join(responsables)
                 interacciones = []
                 if not df_inter.empty:
                     interacciones = df_inter[df_inter['task_id']==task_id].to_dict('records')
                 task['interactions'] = interacciones
+
                 # attach items summary
                 items_for_task = []
                 if not df_items.empty:
                     items_for_task = df_items[df_items['task_id']==task_id].to_dict('records')
                 task['items'] = items_for_task
+
+                # attach extension requests summary
+                extension_requests = []
+                if not df_extension.empty:
+                    extension_requests = df_extension[df_extension['task_id']==task_id].to_dict('records')
+                task['extension_requests'] = extension_requests
+                task['extension_count'] = len(extension_requests)
 
                 status_val = task.get('status') or "Por hacer"
                 if status_val in kanban_data:
@@ -311,9 +324,110 @@ def add_task_interaction(task_id, username, action_type, comment_text=None, imag
     st.success("Interacción registrada en Google Sheets.")
     load_tasks_from_db()
 
+# -------------------------
+# Funciones para extension requests
+# -------------------------
+def request_time_extension(task_id, username, current_due_date, requested_due_date, reason):
+    """Crea una nueva solicitud de extensión de tiempo"""
+    try:
+        sheet = get_gsheet_connection()
+        ws = sheet.worksheet("time_extension_requests")
+        df = get_as_dataframe(ws)
+        df = df[df.iloc[:, 0].notna()].copy() if not df.empty else pd.DataFrame(columns=['id','task_id','username','request_date','current_due_date','requested_due_date','reason','status','approved_by','decision_date'])
 
+        # Calcular nuevo ID
+        new_id = 1
+        if not df.empty and 'id' in df.columns:
+            df['id'] = pd.to_numeric(df['id'], errors='coerce').fillna(0).astype(int)
+            new_id = int(df['id'].max() + 1)
 
+        # Crear nueva solicitud
+        request_date = date.today().strftime("%Y-%m-%d")
+        new_request = {
+            "id": new_id,
+            "task_id": task_id,
+            "username": username,
+            "request_date": request_date,
+            "current_due_date": current_due_date,
+            "requested_due_date": requested_due_date,
+            "reason": reason,
+            "status": "Pendiente",  # Estados: Pendiente, Aprobada, Rechazada
+            "approved_by": None,
+            "decision_date": None
+        }
 
+        # Agregar a la hoja
+        new_df = pd.DataFrame([new_request])
+        if not df.empty:
+            # Asegurar que las columnas coincidan
+            for col in df.columns:
+                if col not in new_df.columns:
+                    new_df[col] = None
+            new_df = new_df[df.columns]
+        df = pd.concat([df, new_df], ignore_index=True)
+        set_with_dataframe(ws, df)
+
+        # Registrar interacción
+        add_task_interaction(task_id, username, "extension_request",
+                            comment_text=f"Solicitada extensión de tiempo hasta {requested_due_date}. Razón: {reason}")
+
+        st.success("✅ Solicitud de extensión enviada. Pendiente de aprobación.")
+        load_tasks_from_db()
+        return True
+    except Exception as e:
+        st.error(f"Error al crear solicitud de extensión: {e}")
+        return False
+
+def update_extension_request_status(request_id, new_status, approved_by):
+    """Actualiza el estado de una solicitud de extensión"""
+    try:
+        sheet = get_gsheet_connection()
+        ws = sheet.worksheet("time_extension_requests")
+        df = get_as_dataframe(ws)
+        df = df[df.iloc[:, 0].notna()].copy() if not df.empty else pd.DataFrame()
+
+        if df.empty:
+            st.error("No hay solicitudes de extensión")
+            return False
+
+        if 'id' in df.columns:
+            df['id'] = pd.to_numeric(df['id'], errors='coerce').fillna(-1).astype(int)
+
+        mask = df["id"] == request_id
+        if mask.any():
+            df.loc[mask, "status"] = new_status
+            df.loc[mask, "approved_by"] = approved_by
+            df.loc[mask, "decision_date"] = date.today().strftime("%Y-%m-%d")
+
+            # Si la solicitud es aprobada, actualizar la fecha de vencimiento de la tarea
+            if new_status == "Aprobada":
+                task_id = int(df.loc[mask, "task_id"].iloc[0])
+                requested_due_date = df.loc[mask, "requested_due_date"].iloc[0]
+
+                # Actualizar fecha de vencimiento en tasks
+                ws_tasks = sheet.worksheet("tasks")
+                df_tasks = get_as_dataframe(ws_tasks)
+                df_tasks = df_tasks[df_tasks.iloc[:, 0].notna()].copy()
+                if 'id' in df_tasks.columns:
+                    df_tasks['id'] = pd.to_numeric(df_tasks['id'], errors='coerce').fillna(-1).astype(int)
+                    task_mask = df_tasks["id"] == task_id
+                    if task_mask.any():
+                        df_tasks.loc[task_mask, "due_date"] = requested_due_date
+                        set_with_dataframe(ws_tasks, df_tasks)
+
+                        # Registrar interacción
+                        add_task_interaction(task_id, approved_by, "extension_approved",
+                                            comment_text=f"Extensión de tiempo aprobada. Nueva fecha de vencimiento: {requested_due_date}")
+
+            set_with_dataframe(ws, df)
+            load_tasks_from_db()
+            return True
+        else:
+            st.error(f"Solicitud con ID {request_id} no encontrada")
+            return False
+    except Exception as e:
+        st.error(f"Error al actualizar solicitud: {e}")
+        return False
 
 # -------------------------
 # Funciones para items
@@ -371,12 +485,6 @@ def recalc_task_progress(task_id):
         avg_progress = task_items['progress'].mean()
         update_task_status_in_db(task_id, None, progress=int(avg_progress))
 
-
-
-
-
-
-
 # -------------------------
 # Procesamiento de imágenes
 # -------------------------
@@ -409,6 +517,7 @@ def generate_excel_export():
         df_collab = get_as_dataframe(sheet.worksheet("task_collaborators"))
         df_inter = get_as_dataframe(sheet.worksheet("task_interactions"))
         df_items = get_as_dataframe(sheet.worksheet("task_items"))
+        df_extensions = get_as_dataframe(sheet.worksheet("time_extension_requests"))
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             if not df_tasks.empty and df_tasks.iloc[:,0].notna().any():
                 df_tasks.to_excel(writer, sheet_name='Tareas', index=False)
@@ -426,6 +535,10 @@ def generate_excel_export():
                 df_items.to_excel(writer, sheet_name='Items', index=False)
             else:
                 pd.DataFrame(columns=['id','task_id','item_name','status','progress','completion_date']).to_excel(writer, sheet_name='Items', index=False)
+            if not df_extensions.empty and df_extensions.iloc[:,0].notna().any():
+                df_extensions.to_excel(writer, sheet_name='Extensiones', index=False)
+            else:
+                pd.DataFrame(columns=['id','task_id','username','request_date','current_due_date','requested_due_date','reason','status','approved_by','decision_date']).to_excel(writer, sheet_name='Extensiones', index=False)
         output.seek(0)
         return output
     except Exception as e:
@@ -435,7 +548,7 @@ def generate_excel_export():
 def clear_task_data_from_db():
     try:
         sheet = get_gsheet_connection()
-        for ws_name in ["task_collaborators", "task_interactions", "tasks", "task_items", "users", "plant_machines"]:
+        for ws_name in ["task_collaborators", "task_interactions", "tasks", "task_items", "users", "plant_machines", "time_extension_requests"]:
             ws = sheet.worksheet(ws_name)
             ws.clear()
             # volver a crear encabezados
@@ -451,6 +564,8 @@ def clear_task_data_from_db():
                 ws.update('A1', [['username','password_hash','role']])
             elif ws_name == "plant_machines":
                 ws.update('A1', [['machine_id','machine_name','area','coord_x','coord_y','machine_type','status','last_maintenance','next_maintenance']])
+            elif ws_name == "time_extension_requests":
+                ws.update('A1', [['id','task_id','username','request_date','current_due_date','requested_due_date','reason','status','approved_by','decision_date']])
         st.success("Google Sheet limpiado correctamente.")
     except Exception as e:
         st.error(f"Error al limpiar Google Sheet: {e}")
@@ -529,20 +644,15 @@ def formatear_tarea_display(t):
     """
     created_by_html = f"<br><strong>👤 Creado por:</strong> {t.get('created_by', 'N/A')}" if t.get('created_by') else "<br><strong>👤 Creado por:</strong> N/A"
 
-        # AÑADIDO: Mostrar enlaces a documentos - VERSIÓN CORREGIDA
+    # AÑADIDO: Mostrar enlaces a documentos
     document_links_html = ""
     try:
         document_links_value = t.get('document_links', '')
-
-        # Verificar que el valor sea string válido y no esté vacío
         if document_links_value and isinstance(document_links_value, str) and document_links_value.strip():
             links = [link.strip() for link in document_links_value.split('\n') if link.strip()]
-
-            # Filtrar solo links válidos (que empiecen con http)
             valid_links = []
             for link in links:
                 if link.startswith(('http://', 'https://', 'www.')):
-                    # Asegurar que los links de www tengan http
                     if link.startswith('www.'):
                         link = 'https://' + link
                     valid_links.append(link)
@@ -551,10 +661,28 @@ def formatear_tarea_display(t):
                 document_links_html = "<br><strong>📎 Documentos:</strong><br>"
                 for i, link in enumerate(valid_links):
                     document_links_html += f'<a href="{link}" target="_blank" style="color: #87CEEB; margin-left: 10px;">📄 Documento {i+1}</a><br>'
-
     except Exception:
-        # Si hay error, no mostrar documentos
         document_links_html = ""
+
+    # AÑADIDO: Mostrar contador de solicitudes de extensión
+    extension_count = t.get('extension_count', 0)
+    extension_html = ""
+    if extension_count > 0:
+        extension_color = "#FF9800" if extension_count == 1 else "#F44336" if extension_count > 1 else "#4CAF50"
+        extension_html = f'<br><strong>⏱️ Solicitudes de extensión:</strong> <span style="background-color: {extension_color}; color: white; padding: 2px 8px; border-radius: 10px; font-weight: bold;">{extension_count}</span>'
+        if extension_count > 0:
+            # Mostrar estado de las solicitudes
+            extension_requests = t.get('extension_requests', [])
+            pending_count = sum(1 for req in extension_requests if req.get('status') == 'Pendiente')
+            approved_count = sum(1 for req in extension_requests if req.get('status') == 'Aprobada')
+            rejected_count = sum(1 for req in extension_requests if req.get('status') == 'Rechazada')
+
+            if pending_count > 0:
+                extension_html += f' <span style="background-color: #FFC107; color: black; padding: 2px 6px; border-radius: 10px; font-size: 0.8em;">{pending_count} pendiente(s)</span>'
+            if approved_count > 0:
+                extension_html += f' <span style="background-color: #4CAF50; color: white; padding: 2px 6px; border-radius: 10px; font-size: 0.8em;">{approved_count} aprobada(s)</span>'
+            if rejected_count > 0:
+                extension_html += f' <span style="background-color: #F44336; color: white; padding: 2px 6px; border-radius: 10px; font-size: 0.8em;">{rejected_count} rechazada(s)</span>'
 
     card_html = f"""
     <div style="background-color:{card_color}; color:white; padding: 10px; border-radius: 8px; margin-bottom: 10px;">
@@ -565,13 +693,15 @@ def formatear_tarea_display(t):
         <br><strong>📅 Creada:</strong> {t.get('date','')}
         {start_date_html}
         {due_date_html}
+        {extension_html}  <!-- AÑADIDO: Contador de extensiones -->
         <br><strong>🧭 Turno:</strong> {t.get('shift','')}
         <br><strong>🔥 Prioridad:</strong> {t.get('priority','')}
-        {document_links_html}  <!-- AÑADIDO: Enlaces a documentos -->
+        {document_links_html}
         {progress_html}
     </div>
     """
-    return {'card_html': card_html, 'interactions': t.get('interactions', []), 'items': t.get('items', [])}
+    return {'card_html': card_html, 'interactions': t.get('interactions', []),
+            'items': t.get('items', []), 'extension_requests': t.get('extension_requests', [])}
 
 # -------------------------
 # Interfaz (login + app)
@@ -632,18 +762,14 @@ def main_app():
     admin_roles = ["admin principal", "supervisor", "coordinador"]
     is_admin = (st.session_state.current_role or "").lower() in admin_roles
 
-    # tabs - MODIFICADO: Agregar pestaña diagrama de gantt
+    # tabs - MODIFICADO: Agregar pestaña para extension requests
     tab_names = ["📋 Tablero Kanban"]
     if is_admin:
         tab_names.insert(0, "➕ Agregar Tarea")
         tab_names.append("📊 Estadísticas")
+        tab_names.append("⏱️ Solicitudes Extensión")
         tab_names.append("⚙️ Gestión Usuarios")
     tabs = st.tabs(tab_names)
-
-
-
-
-
 
     # --- Agregar Tarea (admin) ---
     if is_admin and "➕ Agregar Tarea" in tab_names:
@@ -655,20 +781,16 @@ def main_app():
             df_users = df_users[df_users.iloc[:,0].notna()].copy() if not df_users.empty else pd.DataFrame()
             collab_users = []
             if not df_users.empty and 'role' in df_users.columns:
-                # permitir asignar coordinadores y colaboradores
                 collab_users = df_users[df_users['role'].str.lower().isin(["colaborador","coordinador","supervisor"])]['username'].tolist()
             with st.form("agregar_tarea", clear_on_submit=True):
                 tarea = st.text_input("Nombre de la Tarea*", value="")
                 description = st.text_area("Descripción de la Tarea (Opcional)", value="")
                 items_raw = st.text_area("Items de la tarea (uno por línea) - opcional", value="")
-
-                # AÑADIDO: Campo para enlaces de documentos
                 document_links = st.text_area(
                     "🔗 Enlaces a documentos (uno por línea) - opcional",
                     value="",
                     help="Pega los enlaces públicos de Google Drive a los documentos relacionados"
                 )
-
                 responsables = st.multiselect("Seleccionar Responsables*", options=collab_users)
                 fecha = st.date_input("Fecha de Creación*", date.today())
                 fecha_inicial = st.date_input("Fecha Inicial (Opcional)", value=None)
@@ -731,6 +853,7 @@ def main_app():
             df_items_global = df_items_global[df_items_global.iloc[:,0].notna()].copy() if not df_items_global.empty else pd.DataFrame()
         except Exception:
             df_items_global = pd.DataFrame()
+
         for col, estado in zip(cols, estados):
             with col:
                 st.markdown(f"### {estado}")
@@ -742,16 +865,17 @@ def main_app():
                 for task in tareas_mostrar:
                     task_display = formatear_tarea_display(task)
                     st.markdown(task_display['card_html'], unsafe_allow_html=True)
+
                     # Mostrar items dentro de la tarjeta (compacto)
                     items_task = []
                     if not df_items_global.empty and 'task_id' in df_items_global.columns:
                         df_items_global['task_id'] = pd.to_numeric(df_items_global['task_id'], errors='coerce').fillna(-1).astype(int)
                         items_task = df_items_global[df_items_global['task_id']==int(task['id'])].to_dict('records')
+
                     if items_task:
                         with st.expander("📌 Items", expanded=False):
                             for item in items_task:
                                 st.write(f"**{item.get('item_name')}** - {int(item.get('progress',0))}% [{item.get('status')}]")
-                                # permiso para actualizar item (responsable o admin)
                                 current_username = st.session_state.get('username')
                                 if is_admin or (current_username and current_username in task.get('responsible_list',[])):
                                     with st.form(key=f"form_item_{item['id']}", clear_on_submit=False):
@@ -772,6 +896,41 @@ def main_app():
                                             add_task_interaction(int(task['id']), st.session_state.username, "item_update", comment_text=comment, image_base64=imagen_b64, progress_value=int(new_prog))
                                             recalc_task_progress(int(task['id']))
                                             st.rerun()
+
+                    # Opción para solicitar extensión de tiempo
+                    if estado in ['Por hacer','En proceso'] and task.get('due_date'):
+                        current_username = st.session_state.get('username')
+                        if current_username and current_username in task.get('responsible_list',[]):
+                            with st.expander("⏱️ Solicitar extensión de tiempo", expanded=False):
+                                with st.form(key=f"extension_form_{task['id']}"):
+                                    st.write(f"Fecha de vencimiento actual: **{task.get('due_date')}**")
+                                    current_due_date = task.get('due_date')
+                                    requested_due_date = st.date_input(
+                                        "Nueva fecha de vencimiento solicitada",
+                                        min_value=date.today(),
+                                        key=f"requested_date_{task['id']}"
+                                    )
+                                    reason = st.text_area(
+                                        "Razón de la extensión (requerido)",
+                                        placeholder="Explica por qué necesitas más tiempo...",
+                                        key=f"reason_{task['id']}"
+                                    )
+                                    submit_extension = st.form_submit_button("Enviar solicitud")
+                                    if submit_extension:
+                                        if not reason.strip():
+                                            st.error("Debes proporcionar una razón para la extensión")
+                                        elif requested_due_date <= date.fromisoformat(current_due_date):
+                                            st.error("La nueva fecha debe ser posterior a la fecha actual de vencimiento")
+                                        else:
+                                            if request_time_extension(
+                                                task_id=int(task['id']),
+                                                username=current_username,
+                                                current_due_date=current_due_date,
+                                                requested_due_date=requested_due_date.strftime("%Y-%m-%d"),
+                                                reason=reason
+                                            ):
+                                                st.rerun()
+
                     # historial de interacciones
                     if task_display['interactions']:
                         with st.expander(f"📝 Historial ({len(task_display['interactions'])})", expanded=False):
@@ -787,6 +946,7 @@ def main_app():
                                     except Exception as e:
                                         st.error(f"Error al cargar imagen: {e}")
                                 st.markdown("---")
+
                     # acciones para responsables/admin
                     if estado in ['Por hacer','En proceso']:
                         current_username = st.session_state.get('username')
@@ -820,9 +980,7 @@ def main_app():
                                         add_task_interaction(int(task['id']), st.session_state.username, 'status_change' if submit_completar else 'progress_update', comment_text=comentario, image_base64=imagen_b64, new_status=nuevo_estado, progress_value=int(nuevo_progreso))
                                         st.rerun()
 
-
-
-     # --- Pestaña: Estadísticas (Solo admin) ---
+    # --- Pestaña: Estadísticas (Solo admin) ---
     if is_admin and "📊 Estadísticas" in tab_names:
         with tabs[tab_names.index("📊 Estadísticas")]:
             st.header("📊 Estadísticas del Kanban")
@@ -852,6 +1010,16 @@ def main_app():
                                      (df['due_date'].dt.date <= hoy + timedelta(days=3)) &
                                      (df['status'] != 'Hecho')])
 
+                # Calcular solicitudes de extensión
+                sheet = get_gsheet_connection()
+                ws_extensions = sheet.worksheet("time_extension_requests")
+                df_extensions = get_as_dataframe(ws_extensions)
+                df_extensions = df_extensions[df_extensions.iloc[:, 0].notna()].copy() if not df_extensions.empty else pd.DataFrame()
+
+                total_extensiones = len(df_extensions) if not df_extensions.empty else 0
+                extensiones_pendientes = len(df_extensions[df_extensions['status'] == 'Pendiente']) if not df_extensions.empty else 0
+                extensiones_aprobadas = len(df_extensions[df_extensions['status'] == 'Aprobada']) if not df_extensions.empty else 0
+
                 col1, col2, col3, col4, col5, col6 = st.columns(6)
 
                 with col1:
@@ -874,9 +1042,23 @@ def main_app():
 
                 st.markdown("---")
 
+                # Métricas de extensiones
+                st.subheader("Solicitudes de Extensión")
+                col_ext1, col_ext2, col_ext3 = st.columns(3)
+
+                with col_ext1:
+                    st.metric("📨 Total solicitudes", total_extensiones)
+
+                with col_ext2:
+                    st.metric("⏳ Pendientes", extensiones_pendientes)
+
+                with col_ext3:
+                    st.metric("✅ Aprobadas", extensiones_aprobadas)
+
+                st.markdown("---")
+
                 # Gráfico de estado de tareas
                 st.subheader("Estado de Tareas (Vencimiento)")
-
                 estado_data = {
                     'Categoría': ['Vencidas', 'Por Vencer', 'Completadas'],
                     'Cantidad': [vencidas, por_vencer, completadas]
@@ -902,7 +1084,6 @@ def main_app():
 
                 # Distribución por estado
                 st.subheader("Distribución de Tareas por Estado")
-
                 estado_tareas_data = {
                     'Estado': ['Por hacer', 'En proceso', 'Hecho'],
                     'Cantidad': [por_hacer, en_proceso, completadas]
@@ -928,7 +1109,6 @@ def main_app():
 
                 # Avance por responsable
                 st.subheader("Avance por Responsable")
-
                 df_filtered_responsibles = df[df['responsible_list'].apply(lambda x: isinstance(x, list) and len(x) > 0)]
 
                 if not df_filtered_responsibles.empty:
@@ -960,7 +1140,6 @@ def main_app():
 
                 # Distribución por prioridad
                 st.subheader("Distribución de Tareas por Prioridad")
-
                 if 'priority' in df.columns:
                     prioridad_counts = df['priority'].value_counts().reset_index()
                     prioridad_counts.columns = ['Prioridad', 'Cantidad']
@@ -982,6 +1161,108 @@ def main_app():
                     st.plotly_chart(fig_prioridad, use_container_width=True)
                 else:
                     st.warning("No hay datos de prioridad para mostrar.")
+
+    # --- Pestaña: Solicitudes de Extensión (Solo admin) ---
+    if is_admin and "⏱️ Solicitudes Extensión" in tab_names:
+        with tabs[tab_names.index("⏱️ Solicitudes Extensión")]:
+            st.header("⏱️ Solicitudes de Extensión de Tiempo")
+            st.markdown("---")
+
+            # Cargar solicitudes
+            sheet = get_gsheet_connection()
+            ws_extensions = sheet.worksheet("time_extension_requests")
+            df_extensions = get_as_dataframe(ws_extensions)
+            df_extensions = df_extensions[df_extensions.iloc[:, 0].notna()].copy() if not df_extensions.empty else pd.DataFrame()
+
+            if df_extensions.empty:
+                st.info("No hay solicitudes de extensión pendientes.")
+            else:
+                # Mostrar solicitudes pendientes primero
+                st.subheader("Solicitudes Pendientes")
+                df_pendientes = df_extensions[df_extensions['status'] == 'Pendiente'].copy()
+
+                if df_pendientes.empty:
+                    st.info("No hay solicitudes pendientes.")
+                else:
+                    for _, solicitud in df_pendientes.iterrows():
+                        with st.expander(f"Solicitud #{int(solicitud['id'])} - Tarea ID: {int(solicitud['task_id'])}", expanded=True):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.write(f"**👤 Solicitante:** {solicitud['username']}")
+                                st.write(f"**📅 Fecha solicitud:** {solicitud['request_date']}")
+                                st.write(f"**⏰ Vencimiento actual:** {solicitud['current_due_date']}")
+                                st.write(f"**📅 Vencimiento solicitado:** {solicitud['requested_due_date']}")
+
+                            with col2:
+                                st.write(f"**📋 Razón:**")
+                                st.info(solicitud['reason'])
+
+                            # Botones para aprobar/rechazar
+                            col_btn1, col_btn2, col_btn3 = st.columns([1,1,2])
+                            with col_btn1:
+                                if st.button(f"Aprobar", key=f"approve_{solicitud['id']}", type="primary"):
+                                    if update_extension_request_status(int(solicitud['id']), "Aprobada", st.session_state.username):
+                                        st.success("✅ Solicitud aprobada")
+                                        st.rerun()
+                            with col_btn2:
+                                if st.button(f"Rechazar", key=f"reject_{solicitud['id']}"):
+                                    if update_extension_request_status(int(solicitud['id']), "Rechazada", st.session_state.username):
+                                        st.warning("❌ Solicitud rechazada")
+                                        st.rerun()
+
+                st.markdown("---")
+
+                # Mostrar historial de solicitudes
+                st.subheader("Historial de Solicitudes")
+
+                # Filtrar para excluir pendientes
+                df_historial = df_extensions[df_extensions['status'] != 'Pendiente'].copy()
+
+                if not df_historial.empty:
+                    # Ordenar por fecha de decisión descendente
+                    df_historial['decision_date'] = pd.to_datetime(df_historial['decision_date'], errors='coerce')
+                    df_historial = df_historial.sort_values('decision_date', ascending=False)
+
+                    for _, solicitud in df_historial.iterrows():
+                        status_color = "#4CAF50" if solicitud['status'] == 'Aprobada' else "#F44336"
+
+                        with st.expander(f"{solicitud['status']} - Solicitud #{int(solicitud['id'])} - Tarea ID: {int(solicitud['task_id'])}", expanded=False):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.write(f"**👤 Solicitante:** {solicitud['username']}")
+                                st.write(f"**📅 Fecha solicitud:** {solicitud['request_date']}")
+                                st.write(f"**⏰ Vencimiento actual:** {solicitud['current_due_date']}")
+                                st.write(f"**📅 Vencimiento solicitado:** {solicitud['requested_due_date']}")
+                                st.write(f"**🎚️ Estado:** <span style='color:{status_color}; font-weight:bold;'>{solicitud['status']}</span>", unsafe_allow_html=True)
+
+                            with col2:
+                                st.write(f"**👨‍💼 Aprobado por:** {solicitud['approved_by']}")
+                                st.write(f"**📅 Fecha decisión:** {solicitud['decision_date']}")
+                                st.write(f"**📋 Razón:**")
+                                st.info(solicitud['reason'])
+                else:
+                    st.info("No hay historial de solicitudes procesadas.")
+
+                st.markdown("---")
+
+                # Estadísticas de solicitudes
+                st.subheader("Estadísticas de Solicitudes")
+
+                total = len(df_extensions)
+                pendientes = len(df_pendientes)
+                aprobadas = len(df_extensions[df_extensions['status'] == 'Aprobada'])
+                rechazadas = len(df_extensions[df_extensions['status'] == 'Rechazada'])
+
+                col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+
+                with col_stat1:
+                    st.metric("Total", total)
+                with col_stat2:
+                    st.metric("Pendientes", pendientes)
+                with col_stat3:
+                    st.metric("Aprobadas", aprobadas)
+                with col_stat4:
+                    st.metric("Rechazadas", rechazadas)
 
     # --- Pestaña: Gestión de Usuarios (Solo admin) ---
     if is_admin and "⚙️ Gestión Usuarios" in tab_names:
@@ -1059,7 +1340,6 @@ def main_app():
                     else:
                         st.error("Debe confirmar que entiende esta acción para continuar.")
 
-
 # -------------------------
 # Runner
 # -------------------------
@@ -1072,3 +1352,9 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+
+
+
+
+
