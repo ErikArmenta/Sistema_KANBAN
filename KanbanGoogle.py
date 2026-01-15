@@ -828,6 +828,47 @@ def main_app():
     # --- Tablero Kanban ---
     with tabs[tab_names.index("📋 Tablero Kanban")]:
         st.header("📋 Tablero Kanban")
+
+        # --- NUEVO: RESUMEN DE TAREAS ---
+        with st.expander("📊 Resumen General de Tareas", expanded=False):
+            # Consolidar todas las tareas del diccionario kanban en una lista plana
+            todas_las_tareas = []
+            for estado, lista_tareas in st.session_state.kanban.items():
+                for t in lista_tareas:
+                    # Limpiamos un poco el diccionario para el DataFrame
+                    tarea_limpia = {
+                        "ID": t.get('id'),
+                        "Tarea": t.get('task'),
+                        "Estado": t.get('status'),
+                        "Progreso (%)": t.get('progress'),
+                        "Responsables": ", ".join(t.get('responsible_list', [])),
+                        "Fecha Vencimiento": t.get('due_date'),
+                        "Fecha Completado": t.get('completed_date', 'Pendiente')
+                    }
+                    todas_las_tareas.append(tarea_limpia)
+
+            if todas_las_tareas:
+                df_resumen = pd.DataFrame(todas_las_tareas)
+
+                # Mostrar el DataFrame
+                st.dataframe(df_resumen, use_container_width=True)
+
+                # Botón para descargar Excel
+                import io
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    df_resumen.to_excel(writer, index=False, sheet_name='Tareas')
+
+                st.download_button(
+                    label="📥 Descargar Resumen en Excel",
+                    data=buffer.getvalue(),
+                    file_name=f"resumen_tareas_{date.today()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                st.info("No hay tareas registradas para mostrar en el resumen.")
+        # --- FIN NUEVO BLOQUE ---
+
         st.markdown("---")
         # refrescar manual
         if st.button("🔄 Refrescar Tablero", key="refresh_kanban_top"):
@@ -1352,9 +1393,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-
-
-
-
-
-
