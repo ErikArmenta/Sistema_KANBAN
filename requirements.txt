@@ -6,4 +6,7 @@ pillow==11.3.0
 plotly==6.2.0
 streamlit==1.46.1
 streamlit-aggrid==1.0.5
+xlsxwriter
+openpyxl
+
 
