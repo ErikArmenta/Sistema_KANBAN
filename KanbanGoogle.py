@@ -21,6 +21,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 from PIL import Image
 import base64
 import os
+import requests
+import json
+import streamlit.components.v1 as components
 # from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 
 
@@ -64,6 +67,125 @@ def get_gsheet_connection():
     except Exception as e:
         st.error(f"Error en conexión Google Sheets: {e}")
         raise
+
+
+# ---------------------------
+# SISTEMA DE NOTIFICACIONES (ONESIGNAL)
+# ---------------------------
+class NotificationManager:
+    """
+    Gestor de notificaciones Push usando OneSignal API.
+    Requiere 'app_id' y 'api_key' en st.secrets['onesignal'].
+    """
+    def __init__(self):
+        self.app_id = None
+        self.api_key = None
+        self.headers = {}
+        try:
+            if "onesignal" in st.secrets:
+                self.app_id = st.secrets["onesignal"]["app_id"]
+                self.api_key = st.secrets["onesignal"]["api_key"]
+                self.headers = {
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Authorization": f"Basic {self.api_key}"
+                }
+        except Exception:
+            # Si fallan los secrets, no debe romper el app, solo no enviará notificaciones
+            pass
+
+    def _send_notification(self, payload):
+        """Método interno para hacer el request a OneSignal"""
+        if not self.app_id or not self.api_key:
+            # Silencioso si no está configurado
+            return False
+        
+        try:
+            payload["app_id"] = self.app_id
+            response = requests.post(
+                "https://onesignal.com/api/v1/notifications",
+                headers=self.headers,
+                data=json.dumps(payload),
+                timeout=5
+            )
+            if response.status_code == 200:
+                print(f"Notificación enviada: {response.json()['id']}")
+                return True
+            else:
+                print(f"Error OneSignal {response.status_code}: {response.text}")
+                return False
+        except Exception as e:
+            print(f"Excepción enviando notificación: {e}")
+            return False
+
+    def send_to_users(self, usernames, title, message, data=None):
+        """
+        Envía notificación a usuarios específicos por username (external_user_id).
+        """
+        if not usernames:
+            return False
+            
+        # OneSignal usa include_external_user_ids (o include_aliases en versiones nuevas,
+        # pero include_external_user_ids sigue siendo soportado ampliamente en SDKs web)
+        # Nota: Asegurarse que usernames es una lista de strings
+        target_users = [str(u) for u in usernames if u]
+        
+        payload = {
+            "headings": {"en": title, "es": title},
+            "contents": {"en": message, "es": message},
+            "include_external_user_ids": target_users,
+            # Canal web push
+            "channel_for_external_user_ids": "push" 
+        }
+        if data:
+            payload["data"] = data
+            
+        return self._send_notification(payload)
+
+def inject_onesignal_sdk(username=None):
+    """
+    Inyecta el script de inicialización de OneSignal.
+    Si se provee username, hace el login (setExternalUserId/login).
+    Requiere que st.secrets['onesignal']['app_id'] exista.
+    """
+    if "onesignal" not in st.secrets:
+        return
+
+    app_id = st.secrets["onesignal"]["app_id"]
+    
+    # Script JS para inicializar y loguear
+    # Nota: OneSignal SDK v16+ usa OneSignal.login, versiones anteriores usaban setExternalUserId.
+    # Usaremos una lógica compatible con la versión web actual CDN.
+    
+    js_code = f"""
+    <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+    <script>
+      window.OneSignalDeferred = window.OneSignalDeferred || [];
+      OneSignalDeferred.push(async function(OneSignal) {{
+        await OneSignal.init({{
+          appId: "{app_id}",
+          safari_web_id: "web.onesignal.auto.simulated", # Opcional si tienes config safari
+          notifyButton: {{
+            enable: true,
+          }},
+          allowLocalhostAsSecureOrigin: true, # Para pruebas locales
+        }});
+        
+        // Loguear usuario si está disponible
+        const currentParams = {json.dumps({'user': username}) if username else 'null'};
+        if (currentParams && currentParams.user) {{
+            // v16+ method
+            if (OneSignal.login) {{
+                OneSignal.login(currentParams.user);
+                console.log("OneSignal Login:", currentParams.user);
+            }} else {{
+                // Fallback older versions
+                OneSignal.setExternalUserId(currentParams.user);
+            }}
+        }}
+      }});
+    </script>
+    """
+    components.html(js_code, height=0, width=0)
 
 # ---------------------------
 # Funciones utilitarias y backend
@@ -141,6 +263,8 @@ def login_user(username, password):
         st.session_state.username = username
         st.session_state.current_role = user_data.get('role', 'Colaborador').strip()
         st.success(f"Bienvenido, {username}!")
+        # Inyectar OneSignal Login inmediatamente después del login exitoso
+        inject_onesignal_sdk(username)
         return True
     st.error("Contraseña incorrecta")
     return False
@@ -269,6 +393,19 @@ def add_task_to_db(task_data, initial_status, responsible_usernames):
     set_with_dataframe(ws_collab, df_collab)
 
     st.success("✅ Tarea agregada a Google Sheets.")
+    
+    # --- NOTIFICACIÓN: Nueva Tarea ---
+    try:
+        nm = NotificationManager()
+        nm.send_to_users(
+            usernames=responsible_usernames,
+            title="Nueva Tarea Asignada",
+            message=f"Se te ha asignado la tarea: {task_data.get('task')}",
+            data={"task_id": new_id}
+        )
+    except Exception as e:
+        print(f"Error notificando nueva tarea: {e}")
+
     load_tasks_from_db()
 
 def update_task_status_in_db(task_id, new_status=None, completion_date=None, progress=None):
@@ -322,6 +459,42 @@ def add_task_interaction(task_id, username, action_type, comment_text=None, imag
     df = pd.concat([df, new_row_df], ignore_index=True)
     set_with_dataframe(ws, df)
     st.success("Interacción registrada en Google Sheets.")
+
+    # --- NOTIFICACIÓN: Comentarios/Evidencia ---
+    # Notificar a todos los involucrados en la tarea excepto quien comenta
+    try:
+        if action_type in ["comment", "evidence_upload", "item_update", "status_change", "progress_update"]:
+            nm = NotificationManager()
+            
+            # Obtener colaboradores de la tarea para notificarles
+            sheet = get_gsheet_connection()
+            ws_collab = sheet.worksheet("task_collaborators")
+            df_collab = get_as_dataframe(ws_collab)
+            target_users = []
+            if not df_collab.empty:
+               # Filtrar colaboradores de esta tarea
+               task_collabs = df_collab[df_collab['task_id'] == task_id]['username'].tolist()
+               # Agregar creador de la tarea también si es necesario, o admins, 
+               # pero por simplicidad notificamos a los colaboradores asignados.
+               target_users = [u for u in task_collabs if str(u) != str(username)]
+
+            if target_users:
+                msg_action = "Nueva actualización"
+                if action_type == "comment": msg_action = "Nuevo comentario"
+                elif action_type == "evidence_upload": msg_action = "Nueva evidencia"
+                elif action_type == "status_change": msg_action = "Cambio de estado"
+                
+                msg_text = f"{username}: {comment_text}" if comment_text else f"{username} actualizó la tarea."
+                
+                nm.send_to_users(
+                    usernames=target_users,
+                    title=f"{msg_action} en Tarea #{task_id}",
+                    message=msg_text,
+                    data={"task_id": task_id}
+                )
+    except Exception as e:
+        print(f"Error notificando interacción: {e}")
+
     load_tasks_from_db()
 
 # -------------------------
@@ -372,6 +545,30 @@ def request_time_extension(task_id, username, current_due_date, requested_due_da
                             comment_text=f"Solicitada extensión de tiempo hasta {requested_due_date}. Razón: {reason}")
 
         st.success("✅ Solicitud de extensión enviada. Pendiente de aprobación.")
+        
+        # --- NOTIFICACIÓN: Solicitud de Extensión ---
+        # Notificar a Admins y Supervisores
+        try:
+             ws_users = sheet.worksheet("users")
+             df_users = get_as_dataframe(ws_users)
+             admins = []
+             if not df_users.empty:
+                 # Filtrar usuarios con rol Admin Principal o Supervisor
+                 admins = df_users[
+                     df_users['role'].astype(str).str.lower().isin(['admin principal', 'supervisor'])
+                 ]['username'].tolist()
+             
+             if admins:
+                 nm = NotificationManager()
+                 nm.send_to_users(
+                     usernames=admins,
+                     title="Solicitud de Extensión",
+                     message=f"{username} solicitó extensión para Tarea #{task_id}",
+                     data={"task_id": task_id, "request_id": new_id}
+                 )
+        except Exception as e:
+            print(f"Error notificando extensión: {e}")
+
         load_tasks_from_db()
         return True
     except Exception as e:
@@ -421,6 +618,24 @@ def update_extension_request_status(request_id, new_status, approved_by):
 
             set_with_dataframe(ws, df)
             load_tasks_from_db()
+            
+            # --- NOTIFICACIÓN: Respuesta de Extensión ---
+            # Notificar al solicitante original
+            try:
+                # Obtener el solicitante de la fila modificada
+                requester = df.loc[mask, "username"].iloc[0]
+                task_id_val = df.loc[mask, "task_id"].iloc[0]
+                
+                nm = NotificationManager()
+                nm.send_to_users(
+                    usernames=[requester],
+                    title=f"Solicitud de Extensión {new_status}",
+                    message=f"Tu solicitud para la Tarea #{task_id_val} fue {new_status.lower()} por {approved_by}.",
+                    data={"request_id": request_id}
+                )
+            except Exception as e:
+                print(f"Error notificando respuesta extensión: {e}")
+
             return True
         else:
             st.error(f"Solicitud con ID {request_id} no encontrada")
@@ -744,6 +959,11 @@ def login_screen():
             st.caption("**Engineered by Erik Armenta, M.Eng.** | _Operational Excellence through Technology_")
 
 def main_app():
+    # Inicializar OneSignal SDK en cada carga de la app principal
+    # para asegurar que funcione (especialmente si recargan la página)
+    if st.session_state.get("logged_in") and st.session_state.get("username"):
+        inject_onesignal_sdk(st.session_state.username)
+
     st.set_page_config(page_title="Sistema Kanban", layout="wide")
     # sidebar
     with st.sidebar:
@@ -935,6 +1155,8 @@ def main_app():
                                             update_item_progress_in_db(int(item['id']), new_status, int(new_prog),
                                                                         date.today().strftime("%Y-%m-%d") if new_prog==100 else None)
                                             add_task_interaction(int(task['id']), st.session_state.username, "item_update", comment_text=comment, image_base64=imagen_b64, progress_value=int(new_prog))
+                                            # Notificar interacción de item (usando el mismo trigger en add_task_interaction)
+
                                             recalc_task_progress(int(task['id']))
                                             st.rerun()
 
@@ -1018,7 +1240,9 @@ def main_app():
                                             nuevo_estado = task.get('status')
                                             fecha_completado = None
                                         update_task_status_in_db(int(task['id']), nuevo_estado, fecha_completado, progress=int(nuevo_progreso))
-                                        add_task_interaction(int(task['id']), st.session_state.username, 'status_change' if submit_completar else 'progress_update', comment_text=comentario, image_base64=imagen_b64, new_status=nuevo_estado, progress_value=int(nuevo_progreso))
+                                        add_task_interaction(int(task['id']), st.session_state.username, 'status_change', comment_text=comentario, image_base64=imagen_b64, new_status=nuevo_estado, progress_value=int(nuevo_progreso))
+                                        # Notificar cambio de tarea (usando el mismo trigger en add_task_interaction)
+
                                         st.rerun()
 
     # --- Pestaña: Estadísticas (Solo admin) ---
